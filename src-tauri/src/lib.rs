@@ -1,4 +1,11 @@
 use base64::Engine;
+#[cfg(target_os = "macos")]
+use objc2::{runtime::AnyObject, ClassType};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{
+    NSFloatingWindowLevel, NSPanel, NSScreenSaverWindowLevel, NSWindow, NSWindowCollectionBehavior,
+    NSWindowStyleMask,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -21,6 +28,274 @@ const SPRITESHEET_WIDTH: u32 = 1536;
 const SPRITESHEET_HEIGHT: u32 = 2288;
 const CONFIG_FILE_NAME: &str = "config.json";
 const BUNDLED_CATALOG: &str = include_str!("../../public/pets/index.json");
+
+#[cfg(target_os = "macos")]
+mod macos_overlay {
+    use super::*;
+
+    /// Tauri creates `NSWindow` instances. macOS's fullscreen compositor is
+    /// stricter than the normal window z-order and requires an actual
+    /// non-activating `NSPanel` for a third-party overlay to remain visible.
+    ///
+    /// The panel class has the same instance size as NSWindow on supported
+    /// AppKit versions. Tauri's window is commonly wrapped in AppKit's
+    /// `NSKVONotifying_TaoWindow` subclass, so the class check accepts any
+    /// NSWindow subclass with the same layout instead of requiring the exact
+    /// NSWindow class.
+    fn as_panel(native_window: &NSWindow) -> Option<&NSPanel> {
+        let current_class = native_window.class();
+        let panel_class = NSPanel::class();
+        if current_class != panel_class {
+            let mut class = Some(current_class);
+            let is_ns_window_subclass = std::iter::from_fn(|| {
+                let current = class.take()?;
+                class = current.superclass();
+                Some(current)
+            })
+            .any(|class| class == NSWindow::class());
+            if !is_ns_window_subclass
+                || current_class.instance_size() != panel_class.instance_size()
+            {
+                eprintln!(
+                    "cannot promote pet window to NSPanel (class={:?}, panel_size={}, window_size={})",
+                    current_class.name(),
+                    panel_class.instance_size(),
+                    current_class.instance_size()
+                );
+                return None;
+            }
+            // SAFETY: Tauri's AppKit window subclasses do not add ivars to the
+            // NSWindow layout, NSPanel is an AppKit NSWindow subclass, and
+            // both runtime classes have equal instance sizes. No ivars or
+            // layout are added by this class promotion.
+            unsafe {
+                AnyObject::set_class(native_window, panel_class);
+            }
+        }
+
+        // SAFETY: The object was either already an NSPanel or was just
+        // promoted to NSPanel above, and NSPanel has the same representation
+        // as its NSWindow superclass.
+        Some(unsafe { &*(native_window as *const NSWindow as *const NSPanel) })
+    }
+
+    pub(super) fn apply(
+        window: &tauri::WebviewWindow,
+        show_in_fullscreen: bool,
+    ) -> Result<(), String> {
+        window
+            .with_webview(move |webview| unsafe {
+                let native_window: &NSWindow = &*webview.ns_window().cast();
+                let Some(panel) = as_panel(native_window) else {
+                    return;
+                };
+
+                let fullscreen_behavior = NSWindowCollectionBehavior::CanJoinAllSpaces
+                    | NSWindowCollectionBehavior::CanJoinAllApplications
+                    | NSWindowCollectionBehavior::FullScreenAuxiliary
+                    | NSWindowCollectionBehavior::Stationary
+                    | NSWindowCollectionBehavior::IgnoresCycle;
+                let mut behavior = panel.collectionBehavior();
+                if show_in_fullscreen {
+                    behavior |= fullscreen_behavior;
+                } else {
+                    behavior &= !fullscreen_behavior;
+                }
+                panel.setCollectionBehavior(behavior);
+
+                let mut style_mask = panel.styleMask();
+                if show_in_fullscreen {
+                    style_mask |= NSWindowStyleMask::NonactivatingPanel;
+                } else {
+                    style_mask &= !NSWindowStyleMask::NonactivatingPanel;
+                }
+                panel.setStyleMask(style_mask);
+                panel.setFloatingPanel(show_in_fullscreen);
+                panel.setBecomesKeyOnlyIfNeeded(true);
+                panel.setWorksWhenModal(true);
+                panel.setHidesOnDeactivate(false);
+                panel.setLevel(if show_in_fullscreen {
+                    NSScreenSaverWindowLevel
+                } else {
+                    NSFloatingWindowLevel
+                });
+                if show_in_fullscreen && panel.isVisible() {
+                    panel.orderFrontRegardless();
+                }
+            })
+            .map_err(|error| format!("failed to configure macOS pet panel: {error}"))
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows_overlay {
+    use super::*;
+    use std::ffi::c_void;
+    use windows::core::{IUnknown, Interface, GUID, HRESULT};
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IServiceProvider, CLSCTX_LOCAL_SERVER,
+        COINIT_APARTMENTTHREADED,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_TOPMOST, SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+
+    // Windows exposes the desktop manager for inspection and moving windows,
+    // but the "show on all desktops" operation lives in this Explorer COM
+    // service and is not part of the public Win32 SDK.
+    windows::core::imp::define_interface!(
+        IApplicationViewCollection,
+        IApplicationViewCollection_Vtbl,
+        0x1841C6D7_4F9D_42C0_AF41_8747538F10E5
+    );
+    windows::core::imp::define_interface!(
+        IVirtualDesktopPinnedApps,
+        IVirtualDesktopPinnedApps_Vtbl,
+        0x4CE81583_1E4C_4632_A621_07A53543148F
+    );
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct IApplicationViewCollection_Vtbl {
+        base__: windows::core::IUnknown_Vtbl,
+        GetViews: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
+        GetViewsByZOrder: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
+        GetViewsByAppUserModelId:
+            unsafe extern "system" fn(*mut c_void, *const u16, *mut *mut c_void) -> HRESULT,
+        GetViewForHwnd: unsafe extern "system" fn(*mut c_void, HWND, *mut *mut c_void) -> HRESULT,
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct IVirtualDesktopPinnedApps_Vtbl {
+        base__: windows::core::IUnknown_Vtbl,
+        IsAppIdPinned: unsafe extern "system" fn(*mut c_void, *const u16, *mut i32) -> HRESULT,
+        PinAppID: unsafe extern "system" fn(*mut c_void, *const u16) -> HRESULT,
+        UnpinAppID: unsafe extern "system" fn(*mut c_void, *const u16) -> HRESULT,
+        IsViewPinned: unsafe extern "system" fn(*mut c_void, *mut c_void, *mut i32) -> HRESULT,
+        PinView: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+        UnpinView: unsafe extern "system" fn(*mut c_void, *mut c_void) -> HRESULT,
+    }
+
+    const CLSID_IMMERSIVE_SHELL: GUID = GUID::from_u128(0xC2F03A33_21F5_47FA_B4BB_156362A2F239);
+    const CLSID_VIRTUAL_DESKTOP_PINNED_APPS: GUID =
+        GUID::from_u128(0xB5A399E7_1C87_46B8_88E9_FC5747B171BD);
+    const RPC_E_CHANGED_MODE: HRESULT = HRESULT(0x80010106u32 as i32);
+
+    impl IApplicationViewCollection {
+        unsafe fn get_view_for_hwnd(&self, hwnd: HWND) -> windows::core::Result<Option<IUnknown>> {
+            let mut raw_view = std::ptr::null_mut();
+            (self.vtable().GetViewForHwnd)(self.as_raw(), hwnd, &mut raw_view).ok()?;
+            Ok((!raw_view.is_null()).then(|| <IUnknown as Interface>::from_raw(raw_view)))
+        }
+    }
+
+    impl IVirtualDesktopPinnedApps {
+        unsafe fn is_view_pinned(&self, view: &IUnknown) -> windows::core::Result<bool> {
+            let mut pinned = 0;
+            (self.vtable().IsViewPinned)(self.as_raw(), view.as_raw(), &mut pinned).ok()?;
+            Ok(pinned != 0)
+        }
+
+        unsafe fn pin_view(&self, view: &IUnknown) -> windows::core::Result<()> {
+            (self.vtable().PinView)(self.as_raw(), view.as_raw()).ok()
+        }
+
+        unsafe fn unpin_view(&self, view: &IUnknown) -> windows::core::Result<()> {
+            (self.vtable().UnpinView)(self.as_raw(), view.as_raw()).ok()
+        }
+    }
+
+    pub(super) fn apply(
+        window: &tauri::WebviewWindow,
+        show_in_fullscreen: bool,
+    ) -> Result<(), String> {
+        let hwnd = window
+            .hwnd()
+            .map_err(|error| format!("failed to get Windows pet handle: {error}"))?;
+
+        // Tauri's alwaysOnTop maps to this internally as well. Re-applying it
+        // here makes the fullscreen preference immediately effective after a
+        // setting change and keeps the native intent explicit.
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_ASYNCWINDOWPOS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        }
+        .map_err(|error| format!("failed to set HWND_TOPMOST: {error}"))?;
+
+        if let Err(error) = sync_virtual_desktop_pin(hwnd, show_in_fullscreen) {
+            // Explorer's pinning service is undocumented and can be absent or
+            // temporarily unavailable. The topmost window remains functional.
+            eprintln!("Windows virtual desktop pinning unavailable: {error}");
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn reassert(window: &tauri::WebviewWindow) -> Result<(), String> {
+        let hwnd = window
+            .hwnd()
+            .map_err(|error| format!("failed to get Windows pet handle: {error}"))?;
+        unsafe {
+            SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_ASYNCWINDOWPOS | SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        }
+        .map_err(|error| format!("failed to reassert HWND_TOPMOST: {error}"))?;
+        Ok(())
+    }
+
+    fn sync_virtual_desktop_pin(hwnd: HWND, should_pin: bool) -> windows::core::Result<()> {
+        let com_status = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+        let should_uninitialize = com_status.is_ok();
+        if com_status.is_err() && com_status != RPC_E_CHANGED_MODE {
+            return Err(windows::core::Error::from(com_status));
+        }
+
+        let result = unsafe { sync_virtual_desktop_pin_inner(hwnd, should_pin) };
+        if should_uninitialize {
+            unsafe { CoUninitialize() };
+        }
+        result
+    }
+
+    unsafe fn sync_virtual_desktop_pin_inner(
+        hwnd: HWND,
+        should_pin: bool,
+    ) -> windows::core::Result<()> {
+        let shell: IServiceProvider =
+            CoCreateInstance(&CLSID_IMMERSIVE_SHELL, None, CLSCTX_LOCAL_SERVER)?;
+        let views: IApplicationViewCollection =
+            shell.QueryService(&IApplicationViewCollection::IID)?;
+        let pinned_apps: IVirtualDesktopPinnedApps =
+            shell.QueryService(&CLSID_VIRTUAL_DESKTOP_PINNED_APPS)?;
+        let Some(view) = views.get_view_for_hwnd(hwnd)? else {
+            return Ok(());
+        };
+
+        let is_pinned = pinned_apps.is_view_pinned(&view)?;
+        match (should_pin, is_pinned) {
+            (true, false) => pinned_apps.pin_view(&view)?,
+            (false, true) => pinned_apps.unpin_view(&view)?,
+            _ => {}
+        }
+        Ok(())
+    }
+}
 
 #[cfg(target_os = "macos")]
 mod macos_dock_menu {
@@ -138,6 +413,7 @@ struct PetSettings {
     click_through: bool,
     lock_position: bool,
     quiet_mode: bool,
+    show_in_fullscreen: bool,
     paused: bool,
 }
 
@@ -151,6 +427,7 @@ impl Default for PetSettings {
             click_through: false,
             lock_position: false,
             quiet_mode: false,
+            show_in_fullscreen: false,
             paused: false,
         }
     }
@@ -621,7 +898,103 @@ fn apply_window_settings(
         .map_err(|error| format!("failed to set pet size: {error}"))?;
     window
         .set_ignore_cursor_events(settings.click_through)
-        .map_err(|error| format!("failed to set click-through mode: {error}"))
+        .map_err(|error| format!("failed to set click-through mode: {error}"))?;
+    apply_fullscreen_visibility(window, settings.show_in_fullscreen)
+}
+
+fn apply_fullscreen_visibility(
+    window: &tauri::WebviewWindow,
+    show_in_fullscreen: bool,
+) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    windows_overlay::apply(window, show_in_fullscreen)?;
+
+    #[cfg(not(target_os = "windows"))]
+    window
+        .set_visible_on_all_workspaces(show_in_fullscreen)
+        .map_err(|error| format!("failed to set workspace visibility: {error}"))?;
+
+    #[cfg(target_os = "macos")]
+    macos_overlay::apply(window, show_in_fullscreen)?;
+
+    Ok(())
+}
+
+fn sync_macos_activation_policy(app: &tauri::AppHandle, config: &AppConfig) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let needs_accessory_policy = config.instances.iter().any(|instance| {
+            instance.visible
+                && !config
+                    .disabled_pet_ids
+                    .iter()
+                    .any(|id| id == &instance.pet_id)
+                && settings_for_pet(config, &instance.pet_id).show_in_fullscreen
+        });
+        app.set_activation_policy(if needs_accessory_policy {
+            tauri::ActivationPolicy::Accessory
+        } else {
+            tauri::ActivationPolicy::Regular
+        })
+        .map_err(|error| format!("failed to set macOS activation policy: {error}"))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, config);
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn reassert_fullscreen_overlay(window: &tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    windows_overlay::reassert(window)?;
+
+    #[cfg(target_os = "macos")]
+    {
+        window
+            .set_visible_on_all_workspaces(true)
+            .map_err(|error| format!("failed to refresh macOS workspace visibility: {error}"))?;
+    }
+
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn start_fullscreen_overlay_guard(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let Ok(config) = config_snapshot(&app) else {
+            continue;
+        };
+        let mut overlay_windows = Vec::new();
+        for instance in config.instances.iter().filter(|instance| instance.visible) {
+            let settings = settings_for_pet(&config, &instance.pet_id);
+            if !settings.show_in_fullscreen
+                || config
+                    .disabled_pet_ids
+                    .iter()
+                    .any(|id| id == &instance.pet_id)
+            {
+                continue;
+            }
+            let Ok(label) = instance_label(&instance.id) else {
+                continue;
+            };
+            let Some(window) = app.get_webview_window(&label) else {
+                continue;
+            };
+            overlay_windows.push(window);
+        }
+        if !overlay_windows.is_empty() {
+            for window in overlay_windows {
+                if window.is_visible().unwrap_or(false) {
+                    if let Err(error) = reassert_fullscreen_overlay(&window) {
+                        eprintln!("failed to reassert fullscreen pet overlay: {error}");
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn is_pet_window_label(label: &str) -> bool {
@@ -663,6 +1036,7 @@ fn create_pet_window(
         .map(|position| (position.x, position.y))
         .unwrap_or_else(|| pet_window_position(app, config));
     let pet_settings = settings_for_pet(config, &instance.pet_id);
+    sync_macos_activation_policy(app, config)?;
     let window = WebviewWindowBuilder::new(
         app,
         &label,
@@ -695,6 +1069,7 @@ fn create_pet_window(
         window
             .show()
             .map_err(|error| format!("failed to show pet window: {error}"))?;
+        apply_fullscreen_visibility(&window, pet_settings.show_in_fullscreen)?;
     }
     Ok(())
 }
@@ -842,6 +1217,7 @@ fn set_instance_visible_internal(
         instance.visible = visible;
         Ok(())
     })?;
+    sync_macos_activation_policy(app, &config)?;
     let instance = config
         .instances
         .iter()
@@ -857,6 +1233,10 @@ fn set_instance_visible_internal(
             .any(|id| id == &instance.pet_id)
     {
         window.show().map_err(|error| error.to_string())?;
+        apply_fullscreen_visibility(
+            &window,
+            settings_for_pet(&config, &instance.pet_id).show_in_fullscreen,
+        )?;
     } else {
         window.hide().map_err(|error| error.to_string())?;
     }
@@ -943,6 +1323,7 @@ fn remove_pet_instance(
     if let Some(window) = app.get_webview_window(&instance_label(&instance_id)?) {
         window.close().map_err(|error| error.to_string())?;
     }
+    sync_macos_activation_policy(&app, &config)?;
     rebuild_tray_menu(&app).map_err(|error| error.to_string())?;
     Ok(all_instance_info(&config))
 }
@@ -1012,6 +1393,7 @@ fn update_pet_settings(
         config.pet_settings.insert(pet_id.clone(), settings.clone());
         Ok(())
     })?;
+    sync_macos_activation_policy(&app, &config)?;
     let saved = settings_for_pet(&config, &pet_id);
     broadcast_settings(&app, &pet_id, &saved)?;
     Ok(saved)
@@ -1085,6 +1467,7 @@ fn set_pet_enabled(
         }
         Ok(())
     })?;
+    sync_macos_activation_policy(&app, &config)?;
     for instance in config
         .instances
         .iter()
@@ -1093,6 +1476,10 @@ fn set_pet_enabled(
         if let Some(window) = app.get_webview_window(&instance_label(&instance.id)?) {
             if enabled && instance.visible {
                 window.show().map_err(|error| error.to_string())?;
+                apply_fullscreen_visibility(
+                    &window,
+                    settings_for_pet(&config, &instance.pet_id).show_in_fullscreen,
+                )?;
             } else {
                 window.hide().map_err(|error| error.to_string())?;
             }
@@ -1435,6 +1822,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
 }
 
 fn restore_windows(app: &tauri::AppHandle, config: &AppConfig) -> Result<(), String> {
+    sync_macos_activation_policy(app, config)?;
     if let Some(main) = app.get_webview_window("main") {
         let main_settings = config
             .instances
@@ -1460,6 +1848,7 @@ fn restore_windows(app: &tauri::AppHandle, config: &AppConfig) -> Result<(), Str
             .unwrap_or(true)
         {
             main.show().map_err(|error| error.to_string())?;
+            apply_fullscreen_visibility(&main, main_settings.show_in_fullscreen)?;
         } else {
             main.hide().map_err(|error| error.to_string())?;
         }
@@ -1524,6 +1913,8 @@ pub fn run() {
                 config: Mutex::new(config.clone()),
             });
             restore_windows(&app.handle(), &config)?;
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            start_fullscreen_overlay_guard(&app.handle());
             build_tray(&app.handle())?;
             build_app_menu(&app.handle())?;
             #[cfg(target_os = "macos")]

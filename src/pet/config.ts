@@ -8,6 +8,7 @@ export interface PetSettings {
   clickThrough: boolean;
   lockPosition: boolean;
   quietMode: boolean;
+  showInFullscreen: boolean;
   paused: boolean;
 }
 

@@ -172,6 +172,7 @@ interface PetSettingsControls {
   quietMode: HTMLInputElement;
   lockPosition: HTMLInputElement;
   clickThrough: HTMLInputElement;
+  showInFullscreen: HTMLInputElement;
   pause: HTMLButtonElement;
 }
 
@@ -232,6 +233,7 @@ function syncSettingsControls(controls: PetSettingsControls, next: PetSettings):
   controls.quietMode.checked = next.quietMode;
   controls.lockPosition.checked = next.lockPosition;
   controls.clickThrough.checked = next.clickThrough;
+  controls.showInFullscreen.checked = next.showInFullscreen;
   controls.pause.textContent = next.paused ? "继续动画" : "暂停动画";
   controls.scale.output.textContent = controls.scale.format(next.scale);
   controls.opacity.output.textContent = controls.opacity.format(next.opacity * 100);
@@ -259,6 +261,7 @@ async function savePetSettings(
     clickThrough: controls.clickThrough.checked,
     lockPosition: controls.lockPosition.checked,
     quietMode: controls.quietMode.checked,
+    showInFullscreen: controls.showInFullscreen.checked,
     paused: pet.info.settings.paused,
   };
   setSettingsBusy(controls, true);
@@ -321,7 +324,12 @@ function createSettingsForm(pet: LoadedPet, displayName: string): HTMLFormElemen
     "鼠标点击会传给桌面窗口",
     pet.info.settings.clickThrough,
   );
-  toggleGrid.append(wander, quiet, lock, clickThrough);
+  const showInFullscreen = createToggleRow(
+    "全屏显示",
+    "普通/无边框全屏仍显示（独占全屏除外）",
+    pet.info.settings.showInFullscreen,
+  );
+  toggleGrid.append(wander, quiet, lock, clickThrough, showInFullscreen);
 
   const pause = document.createElement("button");
   pause.type = "button";
@@ -340,6 +348,7 @@ function createSettingsForm(pet: LoadedPet, displayName: string): HTMLFormElemen
     quietMode: quiet.querySelector<HTMLInputElement>("input")!,
     lockPosition: lock.querySelector<HTMLInputElement>("input")!,
     clickThrough: clickThrough.querySelector<HTMLInputElement>("input")!,
+    showInFullscreen: showInFullscreen.querySelector<HTMLInputElement>("input")!,
     pause,
   };
   form.addEventListener("change", () => void savePetSettings(pet, controls, displayName));

@@ -615,9 +615,6 @@ input[type="range"] {
     grid-column: 1 / -1;
   }
 
-  .toggle-grid {
-    grid-template-columns: 1fr;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {

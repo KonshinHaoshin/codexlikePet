@@ -3,6 +3,7 @@ name = "tauri-app"
 version = "0.1.0"
 description = "A Codex-style transparent desktop pet rendered from a V2 sprite atlas"
 authors = ["Ruomu Anshi"]
+license = "MIT"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

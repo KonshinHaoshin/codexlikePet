@@ -1,12 +1,18 @@
 import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
 
 /**
+ * Shared drag-state flag. Set to true while the window is being dragged so
+ * hover logic and look-chasing can coordinate.
+ */
+export const dragState = { current: false };
+
+/**
  * Makes the frameless transparent pet window draggable from anywhere inside
  * the window, using pointer events + the Tauri window API to reposition it.
  */
 export function attachDrag(
   element: HTMLElement,
-  onLookEnabled: (enabled: boolean) => void,
+  onDragChange?: (dragging: boolean) => void,
 ): void {
   const win = getCurrentWindow();
   let dragging = false;
@@ -25,7 +31,8 @@ export function attachDrag(
     } catch {
       startWin = null;
     }
-    onLookEnabled(false); // don't chase the cursor while being dragged
+    dragState.current = true;
+    onDragChange?.(true);
     element.setPointerCapture(e.pointerId);
   });
 
@@ -42,7 +49,8 @@ export function attachDrag(
   const endDrag = (e: PointerEvent) => {
     if (!dragging) return;
     dragging = false;
-    onLookEnabled(true);
+    dragState.current = false;
+    onDragChange?.(false);
     try {
       element.releasePointerCapture(e.pointerId);
     } catch {

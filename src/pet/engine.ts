@@ -11,8 +11,10 @@ import { drawLookCell, drawStateFrame } from "./loader";
  *
  * - Regular states loop their row with per-frame durations.
  * - A non-null `lookDirection` takes precedence and renders a static
- *   look-direction cell (row 9/10). Setting it back to null resumes the state
- *   animation.
+ *   look-direction cell (rows 9/10). Setting it back to null resumes the
+ *   state animation.
+ * - `playOnce` runs a gesture animation (e.g. jumping) for exactly one loop
+ *   and then returns to `idle`.
  */
 export class PetEngine {
   private readonly source: HTMLCanvasElement;
@@ -23,6 +25,7 @@ export class PetEngine {
   private stateFrame = 0;
   private stateElapsed = 0;
   private lastTick = performance.now();
+  private pausedLookFrames = false;
 
   private look: LookDirection | null = null;
 
@@ -55,6 +58,18 @@ export class PetEngine {
     return this.look;
   }
 
+  /**
+   * Play a state once through its full loop, then settle on idle.
+   * Gesture animations (jumping, failed, etc.) free the look-chasing so the
+   * user can see the whole gesture near the pet.
+   */
+  playOnce(state: AnimationState): void {
+    this.state = state;
+    this.stateFrame = 0;
+    this.stateElapsed = 0;
+    this.pausedLookFrames = true;
+  }
+
   play(active: boolean): void {
     if (active === this.playing) return;
     this.playing = active;
@@ -70,13 +85,22 @@ export class PetEngine {
     const dt = now - this.lastTick;
     this.lastTick = now;
 
-    if (this.look === null) {
+    if (this.look === null || this.pausedLookFrames) {
       // Advance the looping state animation using per-frame durations.
       const spec = STATE_TIMING[this.state];
       this.stateElapsed += dt;
       while (this.stateFrame < spec.durations.length && this.stateElapsed >= spec.durations[this.stateFrame]) {
         this.stateElapsed -= spec.durations[this.stateFrame];
-        this.stateFrame = (this.stateFrame + 1) % spec.used;
+        const next = this.stateFrame + 1;
+        this.stateFrame = next % spec.used;
+        // A gesture that just finished its loop settles back to idle.
+        if (this.pausedLookFrames && next >= spec.used) {
+          this.pausedLookFrames = false;
+          this.state = "idle";
+          this.stateFrame = 0;
+          this.stateElapsed = 0;
+          break;
+        }
       }
       drawStateFrame(
         this.source,

@@ -2,7 +2,7 @@ import { CELL_HEIGHT, CELL_WIDTH, type LookDirection } from "./pet/atlas";
 import { loadPet } from "./pet/loader";
 import { PetEngine } from "./pet/engine";
 import { watchCursorDirection } from "./pet/cursorWatcher";
-import { attachDrag, attachGestures, type Gesture } from "./pet/window";
+import { attachDrag, attachGestures, dragState, type Gesture } from "./pet/window";
 
 const PET_BASE = import.meta.env.BASE_URL + "pets/sakimiao";
 const SCALE = 1; // 1 = 原大小 192x208;调大可放大桌宠
@@ -24,12 +24,10 @@ async function boot(): Promise<void> {
     engine.setLook(lastDirection);
   });
 
-  const gestureToState: Record<Gesture, () => void> = {
-    left: () => engine.setState("jumping"),
-    right: () => engine.setState("failed"),
-  };
-
   const petEl = document.querySelector<HTMLElement>("#pet")!;
+
+  // Drag moves the frameless window; while dragging, freeze look-chasing and
+  // show a "running" posture, then resume on release.
   attachDrag(petEl, (enabled) => {
     if (enabled) {
       engine.setLook(lastDirection);
@@ -38,6 +36,29 @@ async function boot(): Promise<void> {
       engine.setState("running");
     }
   });
+
+  // Hover: trigger a one-shot jumping gesture when the mouse enters the pet.
+  // `playOnce` animates through the row then settles back to idle; the look
+  // tracking resumes once the gesture loop completes.
+  let hovered = false;
+  petEl.addEventListener("pointerenter", () => {
+    if (hovered || dragState.current) return;
+    hovered = true;
+    engine.setLook(null);
+    engine.playOnce("jumping");
+  });
+  petEl.addEventListener("pointerleave", () => {
+    hovered = false;
+    if (!dragState.current) {
+      engine.setLook(lastDirection);
+      engine.setState("idle");
+    }
+  });
+
+  const gestureToState: Record<Gesture, () => void> = {
+    left: () => engine.playOnce("jumping"),
+    right: () => engine.playOnce("failed"),
+  };
   attachGestures(petEl, (g) => gestureToState[g]());
 }
 

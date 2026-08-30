@@ -2,7 +2,7 @@ import { CELL_HEIGHT, CELL_WIDTH, type LookDirection } from "./pet/atlas";
 import { loadPet } from "./pet/loader";
 import { PetEngine } from "./pet/engine";
 import { watchCursorDirection } from "./pet/cursorWatcher";
-import { attachDrag, attachGestures, dragState, type Gesture } from "./pet/window";
+import { attachDrag, attachGestures, dragState, type DragDirection, type Gesture } from "./pet/window";
 
 const PET_BASE = import.meta.env.BASE_URL + "pets/sakimiao";
 const SCALE = 1; // 1 = 原大小 192x208;调大可放大桌宠
@@ -29,11 +29,17 @@ async function boot(): Promise<void> {
 
   // Drag moves the frameless window; freeze look-chasing while dragging and
   // resume the nearby cursor direction after release.
-  attachDrag(petEl, (enabled) => {
+  attachDrag(petEl, (enabled, direction: DragDirection | null) => {
     dragging = enabled;
     if (enabled) {
       engine.setLook(null);
-      engine.setState("running");
+      if (direction === "left") {
+        engine.setState("running-left");
+      } else if (direction === "right") {
+        engine.setState("running-right");
+      } else {
+        engine.setState("running");
+      }
     } else {
       engine.setLook(lastDirection);
       engine.setState("idle");

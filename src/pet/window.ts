@@ -7,20 +7,24 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
  */
 export const dragState = { current: false };
 
+export type DragDirection = "left" | "right";
+
 /**
  * Makes the frameless transparent pet window draggable from anywhere inside
  * the window, using pointer events + the Tauri window API to reposition it.
  */
 export function attachDrag(
   element: HTMLElement,
-  onDragChange?: (dragging: boolean) => void,
+  onDragChange?: (dragging: boolean, direction: DragDirection | null) => void,
 ): void {
   const win = getCurrentWindow();
   let dragging = false;
   let dragToken = 0;
   let startPointer = { x: 0, y: 0 };
+  let latestPointer = { x: 0, y: 0 };
   let startWin: { x: number; y: number } | null = null;
   let moved = false;
+  let dragDirection: DragDirection | null = null;
   let pendingPosition: { x: number; y: number } | null = null;
   let flushingPosition = false;
 
@@ -42,6 +46,24 @@ export function attachDrag(
     }
   };
 
+  const updateFromPointer = (x: number, y: number): void => {
+    if (!dragging || !startWin) return;
+    const dx = x - startPointer.x;
+    const dy = y - startPointer.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
+    if (!moved) return;
+
+    pendingPosition = { x: startWin.x + dx, y: startWin.y + dy };
+    if (Math.abs(dx) > Math.abs(dy) && dx !== 0) {
+      const nextDirection: DragDirection = dx < 0 ? "left" : "right";
+      if (dragDirection !== nextDirection) {
+        dragDirection = nextDirection;
+        onDragChange?.(true, nextDirection);
+      }
+    }
+    void flushPosition();
+  };
+
   element.addEventListener("pointerdown", async (e) => {
     if (e.button !== 0) return;
     const token = ++dragToken;
@@ -50,8 +72,10 @@ export function attachDrag(
     startWin = null;
     pendingPosition = null;
     startPointer = { x: e.screenX, y: e.screenY };
+    latestPointer = startPointer;
+    dragDirection = null;
     dragState.current = true;
-    onDragChange?.(true);
+    onDragChange?.(true, null);
     element.setPointerCapture(e.pointerId);
 
     try {
@@ -59,11 +83,12 @@ export function attachDrag(
       if (!dragging || token !== dragToken) return;
       const logicalPos = pos.toLogical(scaleFactor);
       startWin = { x: logicalPos.x, y: logicalPos.y };
+      updateFromPointer(latestPointer.x, latestPointer.y);
     } catch {
       if (token !== dragToken) return;
       dragging = false;
       dragState.current = false;
-      onDragChange?.(false);
+      onDragChange?.(false, null);
       try {
         element.releasePointerCapture(e.pointerId);
       } catch {
@@ -73,14 +98,9 @@ export function attachDrag(
   });
 
   element.addEventListener("pointermove", (e) => {
-    if (!dragging || !startWin) return;
-    const dx = e.screenX - startPointer.x;
-    const dy = e.screenY - startPointer.y;
-    if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
-    if (moved) {
-      pendingPosition = { x: startWin.x + dx, y: startWin.y + dy };
-      void flushPosition();
-    }
+    if (!dragging) return;
+    latestPointer = { x: e.screenX, y: e.screenY };
+    updateFromPointer(latestPointer.x, latestPointer.y);
   });
 
   const endDrag = (e: PointerEvent) => {
@@ -89,8 +109,9 @@ export function attachDrag(
     dragToken += 1;
     pendingPosition = null;
     startWin = null;
+    dragDirection = null;
     dragState.current = false;
-    onDragChange?.(false);
+    onDragChange?.(false, null);
     try {
       element.releasePointerCapture(e.pointerId);
     } catch {

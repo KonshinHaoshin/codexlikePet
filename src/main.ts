@@ -9,9 +9,12 @@ import { watchCursorDirection } from "./pet/cursorWatcher";
 import { PetStateMachine, type PetAction } from "./pet/stateMachine";
 import { attachDrag, attachGestures, dragState, type DragDirection, type Gesture } from "./pet/window";
 import { PetWalker } from "./pet/walker";
-import type { PetSettings, PetSettingsEvent, RuntimeConfig } from "./pet/config";
+import type { PetDialogue, PetSettings, PetSettingsEvent, RuntimeConfig } from "./pet/config";
+import { DEFAULT_DIALOGUE, loadDialogue } from "./pet/dialogue";
 
 const PETS_BASE = import.meta.env.BASE_URL + "pets";
+type DialogueTrigger = Exclude<keyof PetDialogue, "version">;
+const IDLE_SPEECH_DELAY_MS = 90_000;
 
 async function boot(): Promise<void> {
   const window = getCurrentWindow();
@@ -25,9 +28,15 @@ async function boot(): Promise<void> {
   };
 
   const initialPet = await loadRuntimePet();
+  let dialogue = runtime.dialogue ?? DEFAULT_DIALOGUE;
+  if (runtime.source === "bundled" && runtime.path) {
+    dialogue = await loadDialogue(`${PETS_BASE}/${runtime.path}`);
+  }
   let settings: PetSettings = runtime.settings;
   const stage = document.querySelector<HTMLCanvasElement>("#stage")!;
   const petEl = document.querySelector<HTMLElement>("#pet")!;
+  const speech = document.querySelector<HTMLElement>("#speech")!;
+  const speechText = document.querySelector<HTMLElement>("#speech-text")!;
   const setStageSize = (scale: number): void => {
     stage.width = Math.round(CELL_WIDTH * scale);
     stage.height = Math.round(CELL_HEIGHT * scale);
@@ -41,14 +50,62 @@ async function boot(): Promise<void> {
   let dragging = false;
   let hovered = false;
   let lastDirection: LookDirection | null = null;
+  let walking = false;
+  const dialogueIndices: Record<DialogueTrigger, number> = {
+    doubleClick: 0,
+    click: 0,
+    rightClick: 0,
+    walk: 0,
+    drag: 0,
+    idle: 0,
+  };
+  let speechTimer: number | undefined;
+  let idleSpeechTimer: number | undefined;
+  let clickTimer: number | undefined;
+  let dragDialogueShown = false;
 
-  const walker = new PetWalker((walking, direction) => {
-    if (walking && dragging) return;
-    stateMachine.setWalking(walking, direction);
-    if (walking) engine.setLook(null);
-    else if (!dragging) engine.setLook(lastDirection);
+  const sayLine = (trigger: DialogueTrigger): void => {
+    if (paused || settings.quietMode) return;
+    const lines = dialogue[trigger];
+    if (!lines.length) return;
+    const index = dialogueIndices[trigger] % lines.length;
+    speechText.textContent = lines[index];
+    dialogueIndices[trigger] += 1;
+    speech.hidden = false;
+    speech.classList.add("speech-visible");
+    if (speechTimer !== undefined) globalThis.clearTimeout(speechTimer);
+    speechTimer = globalThis.setTimeout(() => {
+      speech.classList.remove("speech-visible");
+      speechTimer = globalThis.setTimeout(() => {
+        speech.hidden = true;
+      }, 180);
+    }, 3600);
+  };
+
+  const scheduleIdleSpeech = (): void => {
+    if (idleSpeechTimer !== undefined) globalThis.clearTimeout(idleSpeechTimer);
+    idleSpeechTimer = undefined;
+    if (paused || settings.quietMode || !dialogue.idle.length) return;
+    idleSpeechTimer = globalThis.setTimeout(() => {
+      idleSpeechTimer = undefined;
+      if (!paused && !settings.quietMode && !dragging && !walking && !stateMachine.hasAction()) {
+        sayLine("idle");
+      }
+      scheduleIdleSpeech();
+    }, IDLE_SPEECH_DELAY_MS);
+  };
+
+  const walker = new PetWalker((isWalking, direction) => {
+    if (isWalking && dragging) return;
+    const startedWalking = isWalking && !walking;
+    walking = isWalking;
+    stateMachine.setWalking(isWalking, direction);
+    if (isWalking) {
+      engine.setLook(null);
+      if (startedWalking) sayLine("walk");
+    } else if (!dragging) engine.setLook(lastDirection);
     syncAnimation();
-    if (!walking) void savePosition();
+    if (!isWalking) void savePosition();
   });
 
   const syncAnimation = (): void => {
@@ -81,6 +138,7 @@ async function boot(): Promise<void> {
     else if (!dragging) walker.start();
     if (!dragging) engine.setLook(lastDirection);
     syncAnimation();
+    scheduleIdleSpeech();
   };
 
   const openPetManager = async (): Promise<void> => {
@@ -116,11 +174,16 @@ async function boot(): Promise<void> {
         engine.cancelAction();
       }
       stateMachine.setDragging(enabled, direction);
+      if (enabled && direction && !dragDialogueShown) {
+        dragDialogueShown = true;
+        sayLine("drag");
+      }
       if (enabled) engine.setLook(null);
       else engine.setLook(lastDirection);
       syncAnimation();
       if (enabled) void savePosition();
       if (!enabled) {
+        dragDialogueShown = false;
         void savePosition();
         if (!paused && settings.wanderEnabled && !settings.quietMode) walker.start();
       }
@@ -139,11 +202,27 @@ async function boot(): Promise<void> {
   });
   petEl.addEventListener("dblclick", (event) => {
     event.preventDefault();
-    void openPetManager();
+    if (clickTimer !== undefined) {
+      globalThis.clearTimeout(clickTimer);
+      clickTimer = undefined;
+    }
+    sayLine("doubleClick");
+    playAction("jumping");
   });
 
-  const gestureToAction: Record<Gesture, PetAction> = { left: "jumping", right: "failed" };
-  attachGestures(petEl, (gesture) => playAction(gestureToAction[gesture]));
+  attachGestures(petEl, (gesture: Gesture) => {
+    if (gesture === "right") {
+      sayLine("rightClick");
+      playAction("failed");
+      return;
+    }
+    if (clickTimer !== undefined) globalThis.clearTimeout(clickTimer);
+    clickTimer = globalThis.setTimeout(() => {
+      clickTimer = undefined;
+      sayLine("click");
+      playAction("jumping");
+    }, 320);
+  });
 
   await listen<PetSettingsEvent>("pet://settings", ({ payload }) => {
     if (payload.petId === runtime.petId) applySettings(payload.settings);
@@ -157,8 +236,8 @@ async function boot(): Promise<void> {
   document.title = initialPet.manifest.displayName;
   engine.play(!paused);
   walker.setSettings(settings.speed, settings.wanderEnabled, settings.quietMode);
+  scheduleIdleSpeech();
   if (!paused && settings.wanderEnabled && !settings.quietMode) walker.start();
-
 }
 
 boot().catch((err) => {

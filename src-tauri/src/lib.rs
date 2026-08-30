@@ -22,6 +22,101 @@ const SPRITESHEET_HEIGHT: u32 = 2288;
 const CONFIG_FILE_NAME: &str = "config.json";
 const BUNDLED_CATALOG: &str = include_str!("../../public/pets/index.json");
 
+#[cfg(target_os = "macos")]
+mod macos_dock_menu {
+    use super::show_pet_manager;
+    use objc2::ffi;
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyObject, Sel};
+    use objc2::{sel, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
+    use objc2_foundation::NSString;
+    use std::ffi::CStr;
+    use std::sync::OnceLock;
+
+    static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+    extern "C-unwind" fn open_pet_manager_from_dock(
+        _this: &AnyObject,
+        _cmd: Sel,
+        _sender: &AnyObject,
+    ) {
+        if let Some(app) = APP_HANDLE.get() {
+            if let Err(error) = show_pet_manager(app) {
+                eprintln!("failed to open pet manager from Dock menu: {error}");
+            }
+        }
+    }
+
+    extern "C-unwind" fn application_dock_menu(
+        this: &AnyObject,
+        _cmd: Sel,
+        _sender: &NSApplication,
+    ) -> *mut NSMenu {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return std::ptr::null_mut();
+        };
+        let menu_title = NSString::from_str("SakiPet");
+        let menu = NSMenu::initWithTitle(mtm.alloc(), &menu_title);
+        let item_title = NSString::from_str("管理宠物");
+        let empty_key = NSString::from_str("");
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                mtm.alloc(),
+                &item_title,
+                Some(sel!(sakiPetOpenManager:)),
+                &empty_key,
+            )
+        };
+        unsafe { item.setTarget(Some(this)) };
+        menu.addItem(&item);
+        Retained::autorelease_return(menu)
+    }
+
+    pub(super) fn install(app: &tauri::AppHandle) -> Result<(), String> {
+        let _ = APP_HANDLE.set(app.clone());
+        let Some(mtm) = MainThreadMarker::new() else {
+            return Err("Dock 菜单必须在 macOS 主线程安装".to_string());
+        };
+        let ns_app = NSApplication::sharedApplication(mtm);
+        let delegate = ns_app
+            .delegate()
+            .ok_or_else(|| "找不到 macOS 应用代理".to_string())?;
+        let delegate_object: &AnyObject = delegate.as_ref();
+        let class = delegate_object.class() as *const _ as *mut _;
+        let encoding = unsafe { CStr::from_bytes_with_nul_unchecked(b"@@:@\0") };
+        let dock_menu_added = unsafe {
+            ffi::class_addMethod(
+                class,
+                sel!(applicationDockMenu:),
+                std::mem::transmute::<
+                    extern "C-unwind" fn(&AnyObject, Sel, &NSApplication) -> *mut NSMenu,
+                    unsafe extern "C-unwind" fn(),
+                >(application_dock_menu),
+                encoding.as_ptr(),
+            )
+        };
+        if !dock_menu_added.as_bool() {
+            return Err("无法向 macOS 应用代理添加 Dock 菜单".to_string());
+        }
+        let action_added = unsafe {
+            ffi::class_addMethod(
+                class,
+                sel!(sakiPetOpenManager:),
+                std::mem::transmute::<
+                    extern "C-unwind" fn(&AnyObject, Sel, &AnyObject),
+                    unsafe extern "C-unwind" fn(),
+                >(open_pet_manager_from_dock),
+                encoding.as_ptr(),
+            )
+        };
+        if !action_added.as_bool() {
+            return Err("无法向 macOS 应用代理添加 Dock 菜单动作".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PetManifest {
@@ -57,6 +152,35 @@ impl Default for PetSettings {
             lock_position: false,
             quiet_mode: false,
             paused: false,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+struct PetDialogue {
+    version: u8,
+    double_click: Vec<String>,
+    click: Vec<String>,
+    right_click: Vec<String>,
+    walk: Vec<String>,
+    drag: Vec<String>,
+    idle: Vec<String>,
+}
+
+impl Default for PetDialogue {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            double_click: vec!["嗯？找我吗？".to_string(), "今天也一起玩吧。".to_string()],
+            click: vec!["怎么啦？".to_string(), "我在这里哦。".to_string()],
+            right_click: vec!["轻一点嘛。".to_string()],
+            walk: vec!["我去附近转转。".to_string(), "散步时间到了！".to_string()],
+            drag: vec!["要带我去哪里呀？".to_string(), "我来啦！".to_string()],
+            idle: vec![
+                "这里待着也很舒服。".to_string(),
+                "要不要陪我说说话？".to_string(),
+            ],
         }
     }
 }
@@ -153,6 +277,7 @@ struct RuntimeConfig {
     manifest: Option<PetManifest>,
     spritesheet_data_url: Option<String>,
     settings: PetSettings,
+    dialogue: PetDialogue,
 }
 
 #[derive(Clone, Serialize)]
@@ -361,6 +486,62 @@ fn data_url(path: &str, bytes: &[u8]) -> String {
         mime_for_path(path),
         base64::engine::general_purpose::STANDARD.encode(bytes)
     )
+}
+
+fn normalize_dialogue(mut dialogue: PetDialogue) -> PetDialogue {
+    let normalize_lines = |lines: Vec<String>| {
+        lines
+            .into_iter()
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .take(32)
+            .collect::<Vec<_>>()
+    };
+    dialogue.double_click = normalize_lines(dialogue.double_click);
+    dialogue.click = normalize_lines(dialogue.click);
+    dialogue.right_click = normalize_lines(dialogue.right_click);
+    dialogue.walk = normalize_lines(dialogue.walk);
+    dialogue.drag = normalize_lines(dialogue.drag);
+    dialogue.idle = normalize_lines(dialogue.idle);
+    if dialogue.double_click.is_empty() {
+        dialogue.double_click = PetDialogue::default().double_click;
+    }
+    dialogue
+}
+
+fn decode_dialogue(bytes: &[u8]) -> Result<PetDialogue, String> {
+    if bytes.len() > 32 * 1024 {
+        return Err("character.json 不能超过 32 KB".to_string());
+    }
+    let dialogue = serde_json::from_slice::<PetDialogue>(bytes)
+        .map_err(|error| format!("character.json 格式错误: {error}"))?;
+    if dialogue.version != 1 {
+        return Err("只支持 character.json version: 1".to_string());
+    }
+    let too_long = [
+        &dialogue.double_click,
+        &dialogue.click,
+        &dialogue.right_click,
+        &dialogue.walk,
+        &dialogue.drag,
+        &dialogue.idle,
+    ]
+    .into_iter()
+    .any(|lines| lines.iter().any(|line| line.chars().count() > 240));
+    if too_long {
+        return Err("character.json 中的单句台词不能超过 240 个字符".to_string());
+    }
+    Ok(normalize_dialogue(dialogue))
+}
+
+fn imported_pet_dialogue(app: &tauri::AppHandle, pet_id: &str) -> PetDialogue {
+    let Some(root) = imported_pets_path(app).ok().map(|path| path.join(pet_id)) else {
+        return PetDialogue::default();
+    };
+    fs::read(root.join("character.json"))
+        .ok()
+        .and_then(|bytes| decode_dialogue(&bytes).ok())
+        .unwrap_or_default()
 }
 
 fn installed_pets(app: &tauri::AppHandle, config: &AppConfig) -> Vec<InstalledPet> {
@@ -630,6 +811,7 @@ fn get_runtime_config(
             manifest: Some(manifest.clone()),
             spritesheet_data_url: Some(data_url(&manifest.spritesheet_path, &sprite)),
             settings: settings_for_pet(&config, &instance.pet_id),
+            dialogue: imported_pet_dialogue(&app, &instance.pet_id),
         });
     }
     let bundled = pet_is_bundled(&instance.pet_id)
@@ -642,6 +824,7 @@ fn get_runtime_config(
         manifest: None,
         spritesheet_data_url: None,
         settings: settings_for_pet(&config, &instance.pet_id),
+        dialogue: PetDialogue::default(),
     })
 }
 
@@ -1003,6 +1186,19 @@ fn import_pet_package(
         .read_to_end(&mut sprite)
         .map_err(|error| format!("无法读取 spritesheet: {error}"))?;
     validate_imported_manifest(&manifest, &manifest.id, &sprite_path, &sprite)?;
+    let character_path = format!("{root}character.json");
+    let character = if archive.file_names().any(|name| name == character_path) {
+        let mut character_bytes = Vec::new();
+        archive
+            .by_name(&character_path)
+            .map_err(|error| format!("无法读取 character.json: {error}"))?
+            .read_to_end(&mut character_bytes)
+            .map_err(|error| format!("无法读取 character.json: {error}"))?;
+        let dialogue = decode_dialogue(&character_bytes)?;
+        Some((character_bytes, dialogue))
+    } else {
+        None
+    };
     if pet_is_bundled(&manifest.id).is_some() || pet_is_imported(&app, &manifest.id).is_some() {
         return Err(format!("宠物 id 已存在: {}", manifest.id));
     }
@@ -1014,6 +1210,10 @@ fn import_pet_package(
     fs::write(pet_root.join("pet.json"), &manifest_bytes)
         .map_err(|error| format!("无法保存 pet.json: {error}"))?;
     fs::write(&sprite_target, &sprite).map_err(|error| format!("无法保存 spritesheet: {error}"))?;
+    if let Some((character_bytes, _)) = &character {
+        fs::write(pet_root.join("character.json"), character_bytes)
+            .map_err(|error| format!("无法保存 character.json: {error}"))?;
+    }
     rebuild_tray_menu(&app).map_err(|error| error.to_string())?;
     let config = config_snapshot(&app)?;
     Ok(InstalledPet {
@@ -1326,6 +1526,10 @@ pub fn run() {
             restore_windows(&app.handle(), &config)?;
             build_tray(&app.handle())?;
             build_app_menu(&app.handle())?;
+            #[cfg(target_os = "macos")]
+            if let Err(error) = macos_dock_menu::install(&app.handle()) {
+                eprintln!("failed to install Dock menu: {error}");
+            }
             if let Some(manager) = app.get_webview_window("pet-manager") {
                 let manager_for_close = manager.clone();
                 manager.on_window_event(move |event| {

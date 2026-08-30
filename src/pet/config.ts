@@ -16,6 +16,16 @@ export interface PetSettingsEvent {
   settings: PetSettings;
 }
 
+export interface PetDialogue {
+  version: number;
+  doubleClick: string[];
+  click: string[];
+  rightClick: string[];
+  walk: string[];
+  drag: string[];
+  idle: string[];
+}
+
 export interface PetInstanceInfo {
   id: string;
   petId: string;
@@ -44,4 +54,5 @@ export interface RuntimeConfig {
   manifest: PetManifest | null;
   spritesheetDataUrl: string | null;
   settings: PetSettings;
+  dialogue: PetDialogue;
 }

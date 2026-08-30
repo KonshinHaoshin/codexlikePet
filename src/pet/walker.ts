@@ -1,6 +1,6 @@
 import { LogicalPosition } from "@tauri-apps/api/dpi";
 import { currentMonitor, getCurrentWindow, primaryMonitor } from "@tauri-apps/api/window";
-import { dragState, type DragDirection } from "./window";
+import { dragState, type MoveDirection } from "./window";
 
 const WALK_DELAY_MIN = 30000;
 const WALK_DELAY_MAX = 60000;
@@ -25,7 +25,7 @@ export class PetWalker {
   private quietMode = false;
 
   constructor(
-    private readonly onChange: (walking: boolean, direction: DragDirection | null) => void,
+    private readonly onChange: (walking: boolean, direction: MoveDirection | null) => void,
   ) {}
 
   setSettings(speed: number, enabled: boolean, quietMode: boolean): void {
@@ -95,47 +95,73 @@ export class PetWalker {
       };
       const currentX = Math.min(bounds.maxX, Math.max(bounds.minX, currentPosition.x));
       const currentY = Math.min(bounds.maxY, Math.max(bounds.minY, currentPosition.y));
-      const targetX = this.pickTarget(currentX, bounds);
-      if (Math.abs(targetX - currentX) < 1) {
+      const movementRoll = Math.random();
+      const diagonalUp = movementRoll < 0.22;
+      const vertical = !diagonalUp && movementRoll < 0.40;
+      const targetX = vertical ? currentX : this.pickTarget(currentX, bounds.minX, bounds.maxX);
+      const targetY = diagonalUp
+        ? this.pickUpperTarget(currentY, bounds.minY)
+        : vertical
+          ? this.pickTarget(currentY, bounds.minY, bounds.maxY)
+          : currentY;
+      const distance = Math.hypot(targetX - currentX, targetY - currentY);
+      if (distance < 1) {
         this.schedule();
         return;
       }
-      const direction: DragDirection = targetX < currentX ? "left" : "right";
-      const duration = Math.max(3500, Math.min(14000, (Math.abs(targetX - currentX) / this.speed) * 1000));
+      const direction = this.directionFor(currentX, currentY, targetX, targetY);
+      const duration = Math.max(3500, Math.min(14000, (distance / this.speed) * 1000));
 
       this.walking = true;
       this.onChange(true, direction);
-      await this.move(token, currentX, currentY, targetX, duration);
+      await this.move(token, currentX, currentY, targetX, targetY, duration);
     } catch (error) {
       console.warn("autonomous pet walk stopped:", error);
       this.finish(token);
     }
   }
 
-  private pickTarget(currentX: number, bounds: WalkBounds): number {
-    const padding = Math.min(24, Math.max(0, (bounds.maxX - bounds.minX) / 2));
-    const minX = bounds.minX + padding;
-    const maxX = bounds.maxX - padding;
-    if (maxX - minX < WALK_MIN_DISTANCE) return currentX;
+  private pickTarget(current: number, minBound: number, maxBound: number): number {
+    const padding = Math.min(24, Math.max(0, (maxBound - minBound) / 2));
+    const min = minBound + padding;
+    const max = maxBound - padding;
+    if (max - min < WALK_MIN_DISTANCE) return current;
 
-    let target = minX + Math.random() * (maxX - minX);
-    if (Math.abs(target - currentX) < WALK_MIN_DISTANCE) {
-      target = currentX < (minX + maxX) / 2 ? maxX : minX;
+    let target = min + Math.random() * (max - min);
+    if (Math.abs(target - current) < WALK_MIN_DISTANCE) {
+      target = current < (min + max) / 2 ? max : min;
     }
     return target;
+  }
+
+  private pickUpperTarget(current: number, minBound: number): number {
+    const max = current - WALK_MIN_DISTANCE;
+    if (max < minBound) return current;
+    return minBound + Math.random() * (max - minBound);
+  }
+
+  private directionFor(startX: number, startY: number, targetX: number, targetY: number): MoveDirection {
+    const horizontal = targetX - startX;
+    const vertical = targetY - startY;
+    if (Math.abs(horizontal) < 1) return vertical < 0 ? "up" : "down";
+    if (Math.abs(vertical) < 1) return horizontal < 0 ? "left" : "right";
+    if (vertical < 0) return horizontal < 0 ? "up-left" : "up-right";
+    return horizontal < 0 ? "down-left" : "down-right";
   }
 
   private async move(
     token: number,
     startX: number,
-    y: number,
+    startY: number,
     targetX: number,
+    targetY: number,
     duration: number,
   ): Promise<void> {
     const startedAt = performance.now();
     while (token === this.walkToken && !dragState.current) {
       const progress = Math.min(1, (performance.now() - startedAt) / duration);
       const x = startX + (targetX - startX) * progress;
+      const y = startY + (targetY - startY) * progress;
       await this.window.setPosition(new LogicalPosition(x, y));
       if (progress >= 1) break;
       await new Promise<void>((resolve) => window.setTimeout(resolve, WALK_TICK_MS));

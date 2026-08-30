@@ -49,11 +49,27 @@ export class PetStateMachine {
   }
 
   animationState(): AnimationState {
-    if (this.dragDirection === "left") return "running-left";
-    if (this.dragDirection === "right") return "running-right";
+    if (this.dragDirection === "left" || this.dragDirection === "up-left" || this.dragDirection === "down-left") {
+      return "running-left";
+    }
+    if (this.dragDirection === "right" || this.dragDirection === "up-right" || this.dragDirection === "down-right") {
+      return "running-right";
+    }
     if (this.dragging) return "running";
-    if (this.walkingDirection === "left") return "running-left";
-    if (this.walkingDirection === "right") return "running-right";
+    if (
+      this.walkingDirection === "left" ||
+      this.walkingDirection === "up-left" ||
+      this.walkingDirection === "down-left"
+    ) {
+      return "running-left";
+    }
+    if (
+      this.walkingDirection === "right" ||
+      this.walkingDirection === "up-right" ||
+      this.walkingDirection === "down-right"
+    ) {
+      return "running-right";
+    }
     if (this.walking) return "running";
     return this.action ?? "idle";
   }

@@ -7,7 +7,16 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
  */
 export const dragState = { current: false };
 
-export type DragDirection = "left" | "right";
+export type MoveDirection =
+  | "left"
+  | "right"
+  | "up"
+  | "down"
+  | "up-left"
+  | "up-right"
+  | "down-left"
+  | "down-right";
+export type DragDirection = MoveDirection;
 
 /**
  * Makes the frameless transparent pet window draggable from anywhere inside
@@ -55,12 +64,27 @@ export function attachDrag(
     if (!moved) return;
 
     pendingPosition = { x: startWin.x + dx, y: startWin.y + dy };
-    if (Math.abs(dx) > Math.abs(dy) && dx !== 0) {
-      const nextDirection: DragDirection = dx < 0 ? "left" : "right";
-      if (dragDirection !== nextDirection) {
-        dragDirection = nextDirection;
-        onDragChange?.(true, nextDirection);
-      }
+    const horizontalDistance = Math.abs(dx);
+    const verticalDistance = Math.abs(dy);
+    const diagonal = horizontalDistance > 8 && verticalDistance > 8;
+    const nextDirection: DragDirection = diagonal
+      ? dy < 0
+        ? dx < 0
+          ? "up-left"
+          : "up-right"
+        : dx < 0
+          ? "down-left"
+          : "down-right"
+      : horizontalDistance >= verticalDistance
+        ? dx < 0
+          ? "left"
+          : "right"
+        : dy < 0
+          ? "up"
+          : "down";
+    if (dragDirection !== nextDirection) {
+      dragDirection = nextDirection;
+      onDragChange?.(true, nextDirection);
     }
     void flushPosition();
   };

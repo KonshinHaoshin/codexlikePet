@@ -15,37 +15,46 @@ export interface PetLoaderResult {
   canvas: HTMLCanvasElement;
 }
 
+async function decodePet(manifest: PetManifest, blob: Blob): Promise<PetLoaderResult> {
+  if (manifest.spriteVersionNumber !== 2) {
+    throw new Error(`unsupported spriteVersionNumber ${manifest.spriteVersionNumber}; only v2 is supported`);
+  }
+
+  const bitmap = await createImageBitmap(blob);
+  const width = bitmap.width;
+  const height = bitmap.height;
+  if (width !== CELL_WIDTH * COLS || height !== CELL_HEIGHT * ROWS) {
+    bitmap.close();
+    throw new Error(`spritesheet is ${width}x${height}; expected ${CELL_WIDTH * COLS}x${CELL_HEIGHT * ROWS}`);
+  }
+
+  // Normalize the bitmap for drawImage + sub-rect slicing inside a canvas.
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext("2d")!;
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return { manifest, canvas };
+}
+
 // Fetch + decode a v2 pet package (pet.json + spritesheet) into a source canvas.
 export async function loadPet(baseUrl: string): Promise<PetLoaderResult> {
   const manifestRes = await fetch(`${baseUrl}/pet.json`);
   if (!manifestRes.ok) throw new Error(`cannot fetch pet.json: ${manifestRes.status}`);
   const manifest: PetManifest = await manifestRes.json();
-
-  if (manifest.spriteVersionNumber !== 2) {
-    throw new Error(`unsupported spriteVersionNumber ${manifest.spriteVersionNumber}; only v2 is supported`);
-  }
-
   const spritesheetRes = await fetch(`${baseUrl}/${manifest.spritesheetPath}`);
   if (!spritesheetRes.ok) throw new Error(`cannot fetch spritesheet: ${spritesheetRes.status}`);
+  return decodePet(manifest, await spritesheetRes.blob());
+}
 
-  const blob = await spritesheetRes.blob();
-  const bitmap = await createImageBitmap(blob);
-
-  // Normalize the bitmap for drawImage + sub-rect slicing inside a canvas.
-  const canvas = document.createElement("canvas");
-  canvas.width = bitmap.width;
-  canvas.height = bitmap.height;
-  const ctx = canvas.getContext("2d")!;
-  ctx.drawImage(bitmap, 0, 0);
-  bitmap.close();
-
-  // Sanity check against the v2 contract (1536x2288).
-  if (canvas.width !== CELL_WIDTH * COLS || canvas.height !== CELL_HEIGHT * ROWS) {
-    console.warn(
-      `spritesheet is ${canvas.width}x${canvas.height}; expected ${CELL_WIDTH * COLS}x${CELL_HEIGHT * ROWS}`,
-    );
-  }
-  return { manifest, canvas };
+/** Decode an imported pet whose spritesheet is delivered by the Rust backend. */
+export async function loadPetFromData(
+  manifest: PetManifest,
+  spritesheetDataUrl: string,
+): Promise<PetLoaderResult> {
+  const response = await fetch(spritesheetDataUrl);
+  return decodePet(manifest, await response.blob());
 }
 
 // Draw the plane sprite for a standard animation row onto a target canvas.

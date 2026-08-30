@@ -18,7 +18,7 @@ export function watchCursorDirection(
     let dir: number | null;
     try {
       // @ts-expect-error Tauri injects window.__TAURI_INTERNALS__ when withGlobalTauri is true
-      dir = (await window.__TAURI_INTERNALS__.invoke("look_direction", { window_label: windowLabel })) as
+      dir = (await window.__TAURI_INTERNALS__.invoke("look_direction", { windowLabel })) as
         | number
         | null;
     } catch {

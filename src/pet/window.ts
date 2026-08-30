@@ -16,6 +16,7 @@ export type DragDirection = "left" | "right";
 export function attachDrag(
   element: HTMLElement,
   onDragChange?: (dragging: boolean, direction: DragDirection | null) => void,
+  canDrag: () => boolean = () => true,
 ): void {
   const win = getCurrentWindow();
   let dragging = false;
@@ -65,7 +66,7 @@ export function attachDrag(
   };
 
   element.addEventListener("pointerdown", async (e) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || !canDrag()) return;
     const token = ++dragToken;
     dragging = true;
     moved = false;

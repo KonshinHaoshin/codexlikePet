@@ -5,7 +5,6 @@ import { dragState, type DragDirection } from "./window";
 const WALK_DELAY_MIN = 30000;
 const WALK_DELAY_MAX = 60000;
 const WALK_MIN_DISTANCE = 160;
-const WALK_SPEED = 95;
 const WALK_TICK_MS = 50;
 
 interface WalkBounds {
@@ -21,13 +20,24 @@ export class PetWalker {
   private timer: number | null = null;
   private walkToken = 0;
   private walking = false;
+  private speed = 95;
+  private enabled = true;
+  private quietMode = false;
 
   constructor(
     private readonly onChange: (walking: boolean, direction: DragDirection | null) => void,
   ) {}
 
+  setSettings(speed: number, enabled: boolean, quietMode: boolean): void {
+    this.speed = speed;
+    this.enabled = enabled;
+    this.quietMode = quietMode;
+    if (!enabled || quietMode) this.stop();
+    else if (this.timer === null && !this.walking) this.schedule();
+  }
+
   start(): void {
-    if (this.timer !== null || this.walking) return;
+    if (!this.enabled || this.quietMode || this.timer !== null || this.walking) return;
     this.schedule();
   }
 
@@ -44,6 +54,7 @@ export class PetWalker {
   }
 
   private schedule(): void {
+    if (!this.enabled || this.quietMode) return;
     const delay = WALK_DELAY_MIN + Math.random() * (WALK_DELAY_MAX - WALK_DELAY_MIN);
     this.timer = window.setTimeout(() => {
       this.timer = null;
@@ -52,7 +63,7 @@ export class PetWalker {
   }
 
   private async walk(): Promise<void> {
-    if (dragState.current) {
+    if (!this.enabled || this.quietMode || dragState.current) {
       this.schedule();
       return;
     }
@@ -90,7 +101,7 @@ export class PetWalker {
         return;
       }
       const direction: DragDirection = targetX < currentX ? "left" : "right";
-      const duration = Math.max(3500, Math.min(14000, (Math.abs(targetX - currentX) / WALK_SPEED) * 1000));
+      const duration = Math.max(3500, Math.min(14000, (Math.abs(targetX - currentX) / this.speed) * 1000));
 
       this.walking = true;
       this.onChange(true, direction);

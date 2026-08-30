@@ -19,7 +19,7 @@ import { drawLookCell, drawStateFrame } from "./loader";
 export class PetEngine {
   private source: HTMLCanvasElement;
   private readonly target: CanvasRenderingContext2D;
-  private readonly scale: number;
+  private scale: number;
 
   private state: AnimationState = "idle";
   private stateFrame = 0;
@@ -54,6 +54,11 @@ export class PetEngine {
     this.stateElapsed = 0;
     this.pausedLookFrames = false;
     this.actionComplete = null;
+    this.target.clearRect(0, 0, this.target.canvas.width, this.target.canvas.height);
+  }
+
+  setScale(scale: number): void {
+    this.scale = scale;
     this.target.clearRect(0, 0, this.target.canvas.width, this.target.canvas.height);
   }
 

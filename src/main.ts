@@ -1,39 +1,87 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { CELL_HEIGHT, CELL_WIDTH, type LookDirection } from "./pet/atlas";
-import { loadPetCatalog, type PetCatalogEntry } from "./pet/catalog";
 import { loadPet } from "./pet/loader";
+import { loadPetFromData } from "./pet/loader";
 import { PetEngine } from "./pet/engine";
 import { watchCursorDirection } from "./pet/cursorWatcher";
 import { PetStateMachine, type PetAction } from "./pet/stateMachine";
 import { attachDrag, attachGestures, dragState, type DragDirection, type Gesture } from "./pet/window";
 import { PetWalker } from "./pet/walker";
+import type { PetSettings, PetSettingsEvent, RuntimeConfig } from "./pet/config";
 
 const PETS_BASE = import.meta.env.BASE_URL + "pets";
-const DEFAULT_PET_ID = "sakimiao";
-const SCALE = 1; // 1 = 原大小 192x208; 调大可放大桌宠
 
 async function boot(): Promise<void> {
-  const catalog = await loadPetCatalog(PETS_BASE);
-  const requestedPetId = new URLSearchParams(window.location.search).get("pet");
-  const requestedPet = requestedPetId ? catalog.find((pet) => pet.id === requestedPetId) : undefined;
-  const firstPet = requestedPet ?? catalog.find((pet) => pet.id === DEFAULT_PET_ID) ?? catalog[0];
-  const isPrimaryPet = requestedPet === undefined;
-  const initialPet = await loadPet(`${PETS_BASE}/${firstPet.path}`);
+  const window = getCurrentWindow();
+  const runtime = await invoke<RuntimeConfig>("get_runtime_config", { windowLabel: window.label });
+  const loadRuntimePet = async (): Promise<Awaited<ReturnType<typeof loadPet>>> => {
+    if (runtime.source === "imported" && runtime.manifest && runtime.spritesheetDataUrl) {
+      return loadPetFromData(runtime.manifest, runtime.spritesheetDataUrl);
+    }
+    if (!runtime.path) throw new Error(`宠物资源不存在：${runtime.petId}`);
+    return loadPet(`${PETS_BASE}/${runtime.path}`);
+  };
 
+  const initialPet = await loadRuntimePet();
+  let settings: PetSettings = runtime.settings;
   const stage = document.querySelector<HTMLCanvasElement>("#stage")!;
-  stage.width = CELL_WIDTH * SCALE;
-  stage.height = CELL_HEIGHT * SCALE;
-  const engine = new PetEngine(initialPet.canvas, stage, SCALE);
-  const stateMachine = new PetStateMachine();
-  engine.play(true);
+  const petEl = document.querySelector<HTMLElement>("#pet")!;
+  const setStageSize = (scale: number): void => {
+    stage.width = Math.round(CELL_WIDTH * scale);
+    stage.height = Math.round(CELL_HEIGHT * scale);
+  };
+  setStageSize(settings.scale);
+  petEl.style.opacity = String(settings.opacity);
 
-  let activePetId = firstPet.id;
-  let lastDirection: LookDirection | null = null;
+  const engine = new PetEngine(initialPet.canvas, stage, settings.scale);
+  const stateMachine = new PetStateMachine();
+  let paused = settings.paused;
   let dragging = false;
   let hovered = false;
-  let paused = false;
-  let switchToken = 0;
+  let lastDirection: LookDirection | null = null;
+
+  const walker = new PetWalker((walking, direction) => {
+    if (walking && dragging) return;
+    stateMachine.setWalking(walking, direction);
+    if (walking) engine.setLook(null);
+    else if (!dragging) engine.setLook(lastDirection);
+    syncAnimation();
+    if (!walking) void savePosition();
+  });
+
+  const syncAnimation = (): void => {
+    engine.setState(stateMachine.animationState());
+  };
+
+  const savePosition = async (): Promise<void> => {
+    try {
+      const [position, scaleFactor] = await Promise.all([window.outerPosition(), window.scaleFactor()]);
+      const logicalPosition = position.toLogical(scaleFactor);
+      await invoke("save_pet_position", {
+        instanceId: runtime.instanceId,
+        x: logicalPosition.x,
+        y: logicalPosition.y,
+      });
+    } catch (error) {
+      console.warn("failed to save pet position:", error);
+    }
+  };
+
+  const applySettings = (next: PetSettings): void => {
+    settings = next;
+    paused = next.paused;
+    setStageSize(next.scale);
+    petEl.style.opacity = String(next.opacity);
+    engine.setScale(next.scale);
+    walker.setSettings(next.speed, next.wanderEnabled, next.quietMode);
+    engine.play(!next.paused);
+    if (next.paused || !next.wanderEnabled || next.quietMode) walker.stop();
+    else if (!dragging) walker.start();
+    if (!dragging) engine.setLook(lastDirection);
+    syncAnimation();
+  };
 
   const openPetManager = async (): Promise<void> => {
     try {
@@ -41,10 +89,6 @@ async function boot(): Promise<void> {
     } catch (error) {
       console.error("failed to open pet manager:", error);
     }
-  };
-
-  const syncAnimation = (): void => {
-    engine.setState(stateMachine.animationState());
   };
 
   const playAction = (action: PetAction): void => {
@@ -57,44 +101,33 @@ async function boot(): Promise<void> {
     });
   };
 
-  // Cursor chasing is limited to the pet window and a small surrounding area.
-  // A null means the cursor is outside that area or inside the deadzone.
   watchCursorDirection((direction) => {
     lastDirection = direction === null ? null : (direction as LookDirection);
     if (!dragging) engine.setLook(lastDirection);
   });
 
-  const petEl = document.querySelector<HTMLElement>("#pet")!;
+  attachDrag(
+    petEl,
+    (enabled, direction: DragDirection | null) => {
+      dragging = enabled;
+      if (enabled) walker.stop();
+      if (enabled && stateMachine.hasAction()) {
+        stateMachine.finishAction();
+        engine.cancelAction();
+      }
+      stateMachine.setDragging(enabled, direction);
+      if (enabled) engine.setLook(null);
+      else engine.setLook(lastDirection);
+      syncAnimation();
+      if (enabled) void savePosition();
+      if (!enabled) {
+        void savePosition();
+        if (!paused && settings.wanderEnabled && !settings.quietMode) walker.start();
+      }
+    },
+    () => !settings.lockPosition && !settings.clickThrough && !paused,
+  );
 
-  const walker = new PetWalker((walking, direction) => {
-    // A pointer drag always owns the window. Ignore a stale walk-start event
-    // if it races with the user's pointerdown.
-    if (walking && dragging) return;
-    stateMachine.setWalking(walking, direction);
-    if (walking) engine.setLook(null);
-    else if (!dragging) engine.setLook(lastDirection);
-    syncAnimation();
-  });
-
-  // Drag moves the frameless window. The state machine turns the drag vector
-  // into running-left/running-right and keeps the generic running state before
-  // a horizontal direction has been established.
-  attachDrag(petEl, (enabled, direction: DragDirection | null) => {
-    dragging = enabled;
-    if (enabled) walker.stop();
-    if (enabled && stateMachine.hasAction()) {
-      stateMachine.finishAction();
-      engine.cancelAction();
-    }
-    stateMachine.setDragging(enabled, direction);
-    if (enabled) engine.setLook(null);
-    else engine.setLook(lastDirection);
-    syncAnimation();
-    if (!enabled && !paused) walker.start();
-  });
-
-  // Hovering the pet makes it react once, while the cursor remains local to the
-  // pet window. Leaving it restores the nearby look pose when no action runs.
   petEl.addEventListener("pointerenter", () => {
     if (hovered || dragState.current) return;
     hovered = true;
@@ -104,63 +137,28 @@ async function boot(): Promise<void> {
     hovered = false;
     if (!dragging && !stateMachine.hasAction()) engine.setLook(lastDirection);
   });
-
-  // The tray icon is easy to miss on macOS, so the pet itself also provides a
-  // discoverable shortcut to the management window.
   petEl.addEventListener("dblclick", (event) => {
     event.preventDefault();
     void openPetManager();
   });
 
-  const gestureToAction: Record<Gesture, PetAction> = {
-    left: "jumping",
-    right: "failed",
-  };
+  const gestureToAction: Record<Gesture, PetAction> = { left: "jumping", right: "failed" };
   attachGestures(petEl, (gesture) => playAction(gestureToAction[gesture]));
 
-  const switchPet = async (id: string): Promise<void> => {
-    const nextPet: PetCatalogEntry | undefined = catalog.find((pet) => pet.id === id);
-    if (!nextPet || nextPet.id === activePetId) return;
-
-    const token = ++switchToken;
-    walker.stop();
-    try {
-      const loaded = await loadPet(`${PETS_BASE}/${nextPet.path}`);
-      if (token !== switchToken) return;
-      activePetId = nextPet.id;
-      engine.cancelAction();
-      stateMachine.reset();
-      engine.setSource(loaded.canvas);
-      engine.setLook(lastDirection);
-      syncAnimation();
-      document.title = loaded.manifest.displayName;
-    } catch (error) {
-      console.error(`failed to switch pet to ${id}:`, error);
-    } finally {
-      if (!paused && !dragging) walker.start();
-    }
-  };
-
+  await listen<PetSettingsEvent>("pet://settings", ({ payload }) => {
+    if (payload.petId === runtime.petId) applySettings(payload.settings);
+  });
   await listen<string>("pet://command", ({ payload }) => {
     if (payload === "open-manager") {
       void openPetManager();
-      return;
-    }
-    if (payload === "toggle-pause") {
-      paused = !paused;
-      if (paused) walker.stop();
-      else if (!dragging) walker.start();
-      engine.play(!paused);
-      return;
-    }
-    if (isPrimaryPet && payload.startsWith("select:")) {
-      void switchPet(payload.slice("select:".length));
     }
   });
 
-  // Keep long idle periods and only occasionally let the pet walk.
-  walker.start();
   document.title = initialPet.manifest.displayName;
+  engine.play(!paused);
+  walker.setSettings(settings.speed, settings.wanderEnabled, settings.quietMode);
+  if (!paused && settings.wanderEnabled && !settings.quietMode) walker.start();
+
 }
 
 boot().catch((err) => {

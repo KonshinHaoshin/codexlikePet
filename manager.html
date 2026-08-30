@@ -12,14 +12,33 @@
         <div>
           <p class="eyebrow">SakiPet</p>
           <h1>宠物管理</h1>
-          <p class="subtitle">可以同时显示多只宠物，每只都会独立待机和行动。</p>
+          <p class="subtitle">管理资源、同时显示不同宠物，并分别调整每只宠物的陪伴方式。</p>
         </div>
-        <button id="refresh" class="secondary-button" type="button">刷新</button>
+        <div class="header-actions">
+          <button id="import-pet" class="primary-button" type="button">导入宠物包</button>
+          <button id="refresh" class="secondary-button" type="button">刷新</button>
+          <input id="pet-package" type="file" accept=".zip,application/zip" hidden />
+        </div>
       </header>
 
       <p id="status" class="status" role="status">正在读取宠物列表…</p>
       <section id="pet-list" class="pet-list" aria-live="polite"></section>
+
     </main>
+
+    <dialog id="pet-settings-dialog" class="settings-dialog" aria-labelledby="settings-dialog-title">
+      <div class="dialog-shell">
+        <div class="dialog-header">
+          <div>
+            <p class="eyebrow">独立设置</p>
+            <h2 id="settings-dialog-title">宠物设置</h2>
+            <p id="settings-dialog-description" class="dialog-description">只影响当前这只宠物。</p>
+          </div>
+          <button id="close-settings-dialog" class="dialog-close" type="button" aria-label="关闭设置">×</button>
+        </div>
+        <div id="settings-dialog-content"></div>
+      </div>
+    </dialog>
 
     <script type="module" src="/src/manager.ts"></script>
   </body>

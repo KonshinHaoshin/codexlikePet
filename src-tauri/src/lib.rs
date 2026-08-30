@@ -1,4 +1,6 @@
-use tauri::Manager;
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Emitter, Manager};
 
 const LOOK_MARGIN_LOGICAL: f64 = 72.0;
 const LOOK_DEADZONE_LOGICAL: f64 = 60.0;
@@ -66,9 +68,78 @@ fn look_direction(app: tauri::AppHandle) -> Option<u8> {
     Some(index as u8)
 }
 
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let show_hide = MenuItem::with_id(app, "show-hide", "显示 / 隐藏宠物", true, None::<&str>)?;
+    let toggle_pause =
+        MenuItem::with_id(app, "toggle-pause", "暂停 / 继续动画", true, None::<&str>)?;
+
+    let sakimiao = MenuItem::with_id(app, "pet-sakimiao", "sakimiao", true, None::<&str>)?;
+    let saki = MenuItem::with_id(app, "pet-saki", "Saki", true, None::<&str>)?;
+    let pets = Submenu::with_id_and_items(app, "pets", "选择宠物", true, &[&sakimiao, &saki])?;
+
+    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &show_hide,
+            &toggle_pause,
+            &pets,
+            &PredefinedMenuItem::separator(app)?,
+            &quit,
+        ],
+    )?;
+
+    let mut tray = TrayIconBuilder::with_id("main")
+        .menu(&menu)
+        .tooltip("SakiPet")
+        .show_menu_on_left_click(true)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show-hide" => {
+                if let Some(window) = app.get_webview_window("main") {
+                    let visible = window.is_visible().unwrap_or(true);
+                    let result = if visible {
+                        window.hide()
+                    } else {
+                        window.show()
+                    };
+                    if let Err(error) = result {
+                        eprintln!("failed to toggle pet visibility: {error}");
+                    }
+                }
+            }
+            "toggle-pause" => {
+                if let Err(error) = app.emit("pet://command", "toggle-pause") {
+                    eprintln!("failed to toggle pet animation: {error}");
+                }
+            }
+            "pet-sakimiao" => {
+                if let Err(error) = app.emit("pet://command", "select:sakimiao") {
+                    eprintln!("failed to select sakimiao: {error}");
+                }
+            }
+            "pet-saki" => {
+                if let Err(error) = app.emit("pet://command", "select:saki") {
+                    eprintln!("failed to select Saki: {error}");
+                }
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        });
+
+    if let Some(icon) = app.default_window_icon().cloned() {
+        tray = tray.icon(icon);
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .setup(|app| {
+            build_tray(&app.handle())?;
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![look_direction])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

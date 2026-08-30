@@ -1,0 +1,6 @@
+{
+  "pets": [
+    { "id": "sakimiao", "path": "sakimiao" },
+    { "id": "saki", "path": "saki" }
+  ]
+}

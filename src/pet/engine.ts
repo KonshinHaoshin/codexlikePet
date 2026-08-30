@@ -17,7 +17,7 @@ import { drawLookCell, drawStateFrame } from "./loader";
  *   and then returns to `idle`.
  */
 export class PetEngine {
-  private readonly source: HTMLCanvasElement;
+  private source: HTMLCanvasElement;
   private readonly target: CanvasRenderingContext2D;
   private readonly scale: number;
 
@@ -26,6 +26,7 @@ export class PetEngine {
   private stateElapsed = 0;
   private lastTick = performance.now();
   private pausedLookFrames = false;
+  private actionComplete: (() => void) | null = null;
 
   private look: LookDirection | null = null;
 
@@ -46,6 +47,16 @@ export class PetEngine {
     }
   }
 
+  setSource(source: HTMLCanvasElement): void {
+    this.source = source;
+    this.state = "idle";
+    this.stateFrame = 0;
+    this.stateElapsed = 0;
+    this.pausedLookFrames = false;
+    this.actionComplete = null;
+    this.target.clearRect(0, 0, this.target.canvas.width, this.target.canvas.height);
+  }
+
   getState(): AnimationState {
     return this.state;
   }
@@ -63,11 +74,21 @@ export class PetEngine {
    * Gesture animations (jumping, failed, etc.) free the look-chasing so the
    * user can see the whole gesture near the pet.
    */
-  playOnce(state: AnimationState): void {
+  playOnce(state: AnimationState, onComplete?: () => void): void {
+    if (this.pausedLookFrames) return;
     this.state = state;
     this.stateFrame = 0;
     this.stateElapsed = 0;
     this.pausedLookFrames = true;
+    this.actionComplete = onComplete ?? null;
+  }
+
+  cancelAction(): void {
+    this.pausedLookFrames = false;
+    this.actionComplete = null;
+    this.state = "idle";
+    this.stateFrame = 0;
+    this.stateElapsed = 0;
   }
 
   play(active: boolean): void {
@@ -95,10 +116,13 @@ export class PetEngine {
         this.stateFrame = next % spec.used;
         // A gesture that just finished its loop settles back to idle.
         if (this.pausedLookFrames && next >= spec.used) {
+          const onComplete = this.actionComplete;
+          this.actionComplete = null;
           this.pausedLookFrames = false;
           this.state = "idle";
           this.stateFrame = 0;
           this.stateElapsed = 0;
+          onComplete?.();
           break;
         }
       }

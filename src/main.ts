@@ -1,4 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { CELL_HEIGHT, CELL_WIDTH, type LookDirection } from "./pet/atlas";
 import { loadPetCatalog, type PetCatalogEntry } from "./pet/catalog";
 import { loadPet } from "./pet/loader";
@@ -14,7 +15,10 @@ const SCALE = 1; // 1 = 原大小 192x208; 调大可放大桌宠
 
 async function boot(): Promise<void> {
   const catalog = await loadPetCatalog(PETS_BASE);
-  const firstPet = catalog.find((pet) => pet.id === DEFAULT_PET_ID) ?? catalog[0];
+  const requestedPetId = new URLSearchParams(window.location.search).get("pet");
+  const requestedPet = requestedPetId ? catalog.find((pet) => pet.id === requestedPetId) : undefined;
+  const firstPet = requestedPet ?? catalog.find((pet) => pet.id === DEFAULT_PET_ID) ?? catalog[0];
+  const isPrimaryPet = requestedPet === undefined;
   const initialPet = await loadPet(`${PETS_BASE}/${firstPet.path}`);
 
   const stage = document.querySelector<HTMLCanvasElement>("#stage")!;
@@ -30,6 +34,14 @@ async function boot(): Promise<void> {
   let hovered = false;
   let paused = false;
   let switchToken = 0;
+
+  const openPetManager = async (): Promise<void> => {
+    try {
+      await invoke("open_pet_manager");
+    } catch (error) {
+      console.error("failed to open pet manager:", error);
+    }
+  };
 
   const syncAnimation = (): void => {
     engine.setState(stateMachine.animationState());
@@ -93,6 +105,13 @@ async function boot(): Promise<void> {
     if (!dragging && !stateMachine.hasAction()) engine.setLook(lastDirection);
   });
 
+  // The tray icon is easy to miss on macOS, so the pet itself also provides a
+  // discoverable shortcut to the management window.
+  petEl.addEventListener("dblclick", (event) => {
+    event.preventDefault();
+    void openPetManager();
+  });
+
   const gestureToAction: Record<Gesture, PetAction> = {
     left: "jumping",
     right: "failed",
@@ -123,6 +142,10 @@ async function boot(): Promise<void> {
   };
 
   await listen<string>("pet://command", ({ payload }) => {
+    if (payload === "open-manager") {
+      void openPetManager();
+      return;
+    }
     if (payload === "toggle-pause") {
       paused = !paused;
       if (paused) walker.stop();
@@ -130,7 +153,9 @@ async function boot(): Promise<void> {
       engine.play(!paused);
       return;
     }
-    if (payload.startsWith("select:")) void switchPet(payload.slice("select:".length));
+    if (isPrimaryPet && payload.startsWith("select:")) {
+      void switchPet(payload.slice("select:".length));
+    }
   });
 
   // Keep long idle periods and only occasionally let the pet walk.

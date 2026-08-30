@@ -1,3 +1,5 @@
+import { getCurrentWindow } from "@tauri-apps/api/window";
+
 /**
  * Polls the Rust `look_direction` command and reports direction changes.
  * Rust returns null when the cursor is outside the pet's local look area.
@@ -11,11 +13,14 @@ export function watchCursorDirection(
   intervalMs = 60,
 ): () => void {
   let last: number | null | undefined = undefined;
+  const windowLabel = getCurrentWindow().label;
   const timer = window.setInterval(async () => {
     let dir: number | null;
     try {
       // @ts-expect-error Tauri injects window.__TAURI_INTERNALS__ when withGlobalTauri is true
-      dir = (await window.__TAURI_INTERNALS__.invoke("look_direction")) as number | null;
+      dir = (await window.__TAURI_INTERNALS__.invoke("look_direction", { window_label: windowLabel })) as
+        | number
+        | null;
     } catch {
       dir = null;
     }

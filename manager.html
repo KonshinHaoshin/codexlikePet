@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>宠物管理</title>
+    <link rel="stylesheet" href="/src/manager.css" />
+  </head>
+  <body>
+    <main class="manager">
+      <header class="manager-header">
+        <div>
+          <p class="eyebrow">SakiPet</p>
+          <h1>宠物管理</h1>
+          <p class="subtitle">可以同时显示多只宠物，每只都会独立待机和行动。</p>
+        </div>
+        <button id="refresh" class="secondary-button" type="button">刷新</button>
+      </header>
+
+      <p id="status" class="status" role="status">正在读取宠物列表…</p>
+      <section id="pet-list" class="pet-list" aria-live="polite"></section>
+    </main>
+
+    <script type="module" src="/src/manager.ts"></script>
+  </body>
+</html>

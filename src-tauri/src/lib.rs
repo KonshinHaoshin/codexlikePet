@@ -1,9 +1,155 @@
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
-use tauri::{Emitter, Manager};
+use tauri::{Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const LOOK_MARGIN_LOGICAL: f64 = 72.0;
 const LOOK_DEADZONE_LOGICAL: f64 = 60.0;
+
+fn show_pet_manager(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("pet-manager") else {
+        return Err("pet manager window is not available".to_string());
+    };
+    window
+        .show()
+        .map_err(|error| format!("failed to show pet manager: {error}"))?;
+    window
+        .set_focus()
+        .map_err(|error| format!("failed to focus pet manager: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn open_pet_manager(app: tauri::AppHandle) -> Result<(), String> {
+    show_pet_manager(&app)
+}
+
+fn pet_window_label(pet_id: &str) -> Result<String, String> {
+    if pet_id.is_empty()
+        || pet_id.len() > 64
+        || !pet_id.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        })
+    {
+        return Err("invalid pet id".to_string());
+    }
+    Ok(format!("pet-{pet_id}"))
+}
+
+fn pet_window_position(app: &tauri::AppHandle) -> (f64, f64) {
+    let offset = app
+        .webview_windows()
+        .keys()
+        .filter(|label| label.starts_with("pet-") && label.as_str() != "pet-manager")
+        .count() as f64;
+
+    if let Some(main) = app.get_webview_window("main") {
+        if let (Ok(position), Ok(scale_factor)) = (main.outer_position(), main.scale_factor()) {
+            return (
+                position.x as f64 / scale_factor + 220.0 * (offset + 1.0),
+                position.y as f64 / scale_factor,
+            );
+        }
+    }
+    (1500.0 + 220.0 * offset, 240.0)
+}
+
+fn visible_pet_ids(app: &tauri::AppHandle) -> Vec<String> {
+    let mut ids = Vec::new();
+    if app
+        .get_webview_window("main")
+        .and_then(|window| window.is_visible().ok())
+        .unwrap_or(false)
+    {
+        ids.push("sakimiao".to_string());
+    }
+
+    for label in app.webview_windows().keys() {
+        if let Some(pet_id) = label.strip_prefix("pet-") {
+            if pet_id != "manager"
+                && app
+                    .get_webview_window(label)
+                    .and_then(|window| window.is_visible().ok())
+                    .unwrap_or(false)
+            {
+                ids.push(pet_id.to_string());
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+#[tauri::command]
+fn get_visible_pets(app: tauri::AppHandle) -> Vec<String> {
+    visible_pet_ids(&app)
+}
+
+#[tauri::command]
+fn set_pet_visible(
+    app: tauri::AppHandle,
+    pet_id: String,
+    visible: bool,
+) -> Result<Vec<String>, String> {
+    if pet_id == "sakimiao" {
+        let window = app
+            .get_webview_window("main")
+            .ok_or_else(|| "main pet window is not available".to_string())?;
+        if visible {
+            window.show().map_err(|error| error.to_string())?;
+        } else {
+            window.hide().map_err(|error| error.to_string())?;
+        }
+        return Ok(visible_pet_ids(&app));
+    }
+
+    let label = pet_window_label(&pet_id)?;
+    if let Some(window) = app.get_webview_window(&label) {
+        if visible {
+            window.show().map_err(|error| error.to_string())?;
+        } else {
+            window.hide().map_err(|error| error.to_string())?;
+        }
+    } else if visible {
+        let (x, y) = pet_window_position(&app);
+        WebviewWindowBuilder::new(
+            &app,
+            &label,
+            WebviewUrl::App(format!("index.html?pet={pet_id}").into()),
+        )
+        .title("SakiPet")
+        .inner_size(192.0, 208.0)
+        .position(x, y)
+        .transparent(true)
+        .decorations(false)
+        .always_on_top(true)
+        .accept_first_mouse(true)
+        .skip_taskbar(true)
+        .shadow(false)
+        .resizable(false)
+        .focused(false)
+        .visible(true)
+        .build()
+        .map_err(|error| format!("failed to create pet window: {error}"))?;
+    }
+    Ok(visible_pet_ids(&app))
+}
+
+fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let manage_pets = MenuItem::with_id(app, "app-manage-pets", "管理宠物", true, None::<&str>)?;
+    let app_submenu =
+        Submenu::with_id_and_items(app, "sakipet-app-menu", "SakiPet", true, &[&manage_pets])?;
+    let menu = Menu::with_items(app, &[&app_submenu])?;
+    app.set_menu(menu)?;
+    app.on_menu_event(|app, event| {
+        if event.id().as_ref() == "app-manage-pets" {
+            if let Err(error) = show_pet_manager(app) {
+                eprintln!("{error}");
+            }
+        }
+    });
+    Ok(())
+}
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 
@@ -15,9 +161,9 @@ const LOOK_DEADZONE_LOGICAL: f64 = 60.0;
 /// - `None`     => cursor is outside the local look area or inside the pet
 ///   deadzone; the app should fall back to idle.
 #[tauri::command]
-fn look_direction(app: tauri::AppHandle) -> Option<u8> {
+fn look_direction(app: tauri::AppHandle, window_label: String) -> Option<u8> {
     let cursor = app.cursor_position().ok()?;
-    let window = app.get_webview_window("main")?;
+    let window = app.get_webview_window(&window_label)?;
     let pos = window.outer_position().ok()?;
     let size = window.outer_size().ok()?;
     let scale_factor = window.scale_factor().ok()?;
@@ -70,6 +216,7 @@ fn look_direction(app: tauri::AppHandle) -> Option<u8> {
 
 fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show_hide = MenuItem::with_id(app, "show-hide", "显示 / 隐藏宠物", true, None::<&str>)?;
+    let manage_pets = MenuItem::with_id(app, "manage-pets", "管理宠物", true, None::<&str>)?;
     let toggle_pause =
         MenuItem::with_id(app, "toggle-pause", "暂停 / 继续动画", true, None::<&str>)?;
 
@@ -82,6 +229,7 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         app,
         &[
             &show_hide,
+            &manage_pets,
             &toggle_pause,
             &pets,
             &PredefinedMenuItem::separator(app)?,
@@ -107,18 +255,23 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                     }
                 }
             }
+            "manage-pets" => {
+                if let Err(error) = show_pet_manager(app) {
+                    eprintln!("{error}");
+                }
+            }
             "toggle-pause" => {
                 if let Err(error) = app.emit("pet://command", "toggle-pause") {
                     eprintln!("failed to toggle pet animation: {error}");
                 }
             }
             "pet-sakimiao" => {
-                if let Err(error) = app.emit("pet://command", "select:sakimiao") {
+                if let Err(error) = app.emit_to("main", "pet://command", "select:sakimiao") {
                     eprintln!("failed to select sakimiao: {error}");
                 }
             }
             "pet-saki" => {
-                if let Err(error) = app.emit("pet://command", "select:saki") {
+                if let Err(error) = app.emit_to("main", "pet://command", "select:saki") {
                     eprintln!("failed to select Saki: {error}");
                 }
             }
@@ -138,9 +291,24 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             build_tray(&app.handle())?;
+            build_app_menu(&app.handle())?;
+            if let Some(manager) = app.get_webview_window("pet-manager") {
+                let manager_for_close = manager.clone();
+                manager.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = manager_for_close.hide();
+                    }
+                });
+            }
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![look_direction])
+        .invoke_handler(tauri::generate_handler![
+            look_direction,
+            open_pet_manager,
+            get_visible_pets,
+            set_pet_visible
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

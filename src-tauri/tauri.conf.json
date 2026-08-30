@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "CodexLikePet",
+  "productName": "SakiPet",
   "version": "0.1.0",
   "identifier": "com.ifan.codexlike-pet",
   "build": {
@@ -15,7 +15,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "CodexLikePet",
+        "title": "SakiPet",
         "width": 192,
         "height": 208,
         "x": 1280,
@@ -31,6 +31,19 @@
         "maximizable": false,
         "fullscreen": false,
         "visible": true
+      },
+      {
+        "label": "pet-manager",
+        "title": "宠物管理",
+        "url": "manager.html",
+        "width": 520,
+        "height": 620,
+        "center": true,
+        "decorations": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": false,
+        "resizable": true,
+        "visible": false
       }
     ],
     "security": {

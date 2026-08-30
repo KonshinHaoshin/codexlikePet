@@ -129,7 +129,6 @@ mod macos_overlay {
 
 #[cfg(target_os = "windows")]
 mod windows_overlay {
-    use super::*;
     use std::ffi::c_void;
     use windows::core::{IUnknown, Interface, GUID, HRESULT};
     use windows::Win32::Foundation::HWND;

@@ -1,4 +1,5 @@
-import { getCurrentWindow, PhysicalPosition } from "@tauri-apps/api/window";
+import { LogicalPosition } from "@tauri-apps/api/dpi";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 /**
  * Shared drag-state flag. Set to true while the window is being dragged so
@@ -16,39 +17,78 @@ export function attachDrag(
 ): void {
   const win = getCurrentWindow();
   let dragging = false;
+  let dragToken = 0;
   let startPointer = { x: 0, y: 0 };
   let startWin: { x: number; y: number } | null = null;
   let moved = false;
+  let pendingPosition: { x: number; y: number } | null = null;
+  let flushingPosition = false;
+
+  const flushPosition = async (): Promise<void> => {
+    if (flushingPosition) return;
+    flushingPosition = true;
+    try {
+      while (dragging && pendingPosition) {
+        const next = pendingPosition;
+        pendingPosition = null;
+        try {
+          await win.setPosition(new LogicalPosition(next.x, next.y));
+        } catch {
+          // The window may disappear while the pointer is still captured.
+        }
+      }
+    } finally {
+      flushingPosition = false;
+    }
+  };
 
   element.addEventListener("pointerdown", async (e) => {
     if (e.button !== 0) return;
+    const token = ++dragToken;
     dragging = true;
     moved = false;
+    startWin = null;
+    pendingPosition = null;
     startPointer = { x: e.screenX, y: e.screenY };
-    try {
-      const pos = await win.outerPosition();
-      startWin = { x: pos.x, y: pos.y };
-    } catch {
-      startWin = null;
-    }
     dragState.current = true;
     onDragChange?.(true);
     element.setPointerCapture(e.pointerId);
+
+    try {
+      const [pos, scaleFactor] = await Promise.all([win.outerPosition(), win.scaleFactor()]);
+      if (!dragging || token !== dragToken) return;
+      const logicalPos = pos.toLogical(scaleFactor);
+      startWin = { x: logicalPos.x, y: logicalPos.y };
+    } catch {
+      if (token !== dragToken) return;
+      dragging = false;
+      dragState.current = false;
+      onDragChange?.(false);
+      try {
+        element.releasePointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    }
   });
 
-  element.addEventListener("pointermove", async (e) => {
+  element.addEventListener("pointermove", (e) => {
     if (!dragging || !startWin) return;
     const dx = e.screenX - startPointer.x;
     const dy = e.screenY - startPointer.y;
     if (Math.abs(dx) + Math.abs(dy) > 3) moved = true;
     if (moved) {
-      await win.setPosition(new PhysicalPosition(startWin.x + dx, startWin.y + dy));
+      pendingPosition = { x: startWin.x + dx, y: startWin.y + dy };
+      void flushPosition();
     }
   });
 
   const endDrag = (e: PointerEvent) => {
     if (!dragging) return;
     dragging = false;
+    dragToken += 1;
+    pendingPosition = null;
+    startWin = null;
     dragState.current = false;
     onDragChange?.(false);
     try {

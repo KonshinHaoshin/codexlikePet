@@ -1,9 +1,10 @@
 /**
- * Polls the Rust `look_direction` command (global cursor relative to the
- * transparent pet window center) and reports direction changes.
+ * Polls the Rust `look_direction` command and reports direction changes.
+ * Rust returns null when the cursor is outside the pet's local look area.
  *
  * - `number` 0..=15: the 16-way direction index (0 = up, clockwise).
- * - `null`: cursor sits in the pet deadzone -> fall back to idle/front.
+ * - `null`: cursor is outside the local look area or sits in the deadzone ->
+ *   fall back to idle/front.
  */
 export function watchCursorDirection(
   onDirection: (d: number | null) => void,

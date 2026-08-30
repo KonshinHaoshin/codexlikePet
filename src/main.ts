@@ -16,24 +16,27 @@ async function boot(): Promise<void> {
   const engine = new PetEngine(atlas, stage, SCALE);
   engine.play(true);
 
-  // Cursor chasing. Look frames have a content deadzone; a null means the
-  // cursor is near the pet, so fall back to the idle loop.
+  // Cursor chasing is limited to the pet window and a small surrounding area.
+  // A null means the cursor is outside that area or inside the deadzone.
   let lastDirection: LookDirection | null = null;
+  let dragging = false;
   watchCursorDirection((d) => {
     lastDirection = d === null ? null : (d as LookDirection);
-    engine.setLook(lastDirection);
+    if (!dragging) engine.setLook(lastDirection);
   });
 
   const petEl = document.querySelector<HTMLElement>("#pet")!;
 
-  // Drag moves the frameless window; while dragging, freeze look-chasing and
-  // show a "running" posture, then resume on release.
+  // Drag moves the frameless window; freeze look-chasing while dragging and
+  // resume the nearby cursor direction after release.
   attachDrag(petEl, (enabled) => {
+    dragging = enabled;
     if (enabled) {
-      engine.setLook(lastDirection);
-    } else {
       engine.setLook(null);
       engine.setState("running");
+    } else {
+      engine.setLook(lastDirection);
+      engine.setState("idle");
     }
   });
 

@@ -922,20 +922,13 @@ fn apply_fullscreen_visibility(
 fn sync_macos_activation_policy(app: &tauri::AppHandle, config: &AppConfig) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let needs_accessory_policy = config.instances.iter().any(|instance| {
-            instance.visible
-                && !config
-                    .disabled_pet_ids
-                    .iter()
-                    .any(|id| id == &instance.pet_id)
-                && settings_for_pet(config, &instance.pet_id).show_in_fullscreen
-        });
-        app.set_activation_policy(if needs_accessory_policy {
-            tauri::ActivationPolicy::Accessory
-        } else {
-            tauri::ActivationPolicy::Regular
-        })
-        .map_err(|error| format!("failed to set macOS activation policy: {error}"))?;
+        // Keep SakiPet as a regular macOS application so its Dock icon and
+        // application menu remain available. Fullscreen visibility is handled
+        // by the pet window's NSPanel/collection behavior instead of hiding
+        // the whole application from the Dock with Accessory policy.
+        let _ = config;
+        app.set_activation_policy(tauri::ActivationPolicy::Regular)
+            .map_err(|error| format!("failed to set macOS activation policy: {error}"))?;
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (app, config);

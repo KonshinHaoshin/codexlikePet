@@ -156,7 +156,7 @@ mod windows_overlay {
 
     #[repr(C)]
     #[allow(non_snake_case)]
-    struct IApplicationViewCollection_Vtbl {
+    pub struct IApplicationViewCollection_Vtbl {
         base__: windows::core::IUnknown_Vtbl,
         GetViews: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
         GetViewsByZOrder: unsafe extern "system" fn(*mut c_void, *mut *mut c_void) -> HRESULT,
@@ -167,7 +167,7 @@ mod windows_overlay {
 
     #[repr(C)]
     #[allow(non_snake_case)]
-    struct IVirtualDesktopPinnedApps_Vtbl {
+    pub struct IVirtualDesktopPinnedApps_Vtbl {
         base__: windows::core::IUnknown_Vtbl,
         IsAppIdPinned: unsafe extern "system" fn(*mut c_void, *const u16, *mut i32) -> HRESULT,
         PinAppID: unsafe extern "system" fn(*mut c_void, *const u16) -> HRESULT,
@@ -1955,6 +1955,8 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
+            #[cfg(not(target_os = "macos"))]
+            let _ = (&app, &event);
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen {
                 has_visible_windows: false,

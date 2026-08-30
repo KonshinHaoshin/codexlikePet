@@ -922,12 +922,12 @@ fn apply_fullscreen_visibility(
 fn sync_macos_activation_policy(app: &tauri::AppHandle, config: &AppConfig) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        // Keep SakiPet as a regular macOS application so its Dock icon and
-        // application menu remain available. Fullscreen visibility is handled
-        // by the pet window's NSPanel/collection behavior instead of hiding
-        // the whole application from the Dock with Accessory policy.
+        // macOS only allows a non-activating overlay to reliably join another
+        // app's native fullscreen Space when the owning app is an accessory.
+        // SakiPet intentionally uses the menu bar tray as its app entry point;
+        // this keeps the pet visible in fullscreen while avoiding a Dock item.
         let _ = config;
-        app.set_activation_policy(tauri::ActivationPolicy::Regular)
+        app.set_activation_policy(tauri::ActivationPolicy::Accessory)
             .map_err(|error| format!("failed to set macOS activation policy: {error}"))?;
     }
     #[cfg(not(target_os = "macos"))]

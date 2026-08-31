@@ -451,7 +451,14 @@ function render(): void {
       remove.className = "secondary-button danger-button";
       remove.textContent = "删除资源";
       remove.addEventListener("click", async () => {
-        if (!(await confirmDialog("删除后需要重新导入宠物包，确定继续吗？"))) return;
+        const activeInstanceNote = current.length
+          ? `当前正在显示 ${current.length} 只，删除时会一并关闭。`
+          : "";
+        if (
+          !(await confirmDialog(
+            `删除后需要重新导入宠物包。${activeInstanceNote}确定继续吗？`,
+          ))
+        ) return;
         setBusy(remove, true);
         try {
           await invoke("remove_imported_pet", { petId: pet.info.id });

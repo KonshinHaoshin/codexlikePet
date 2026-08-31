@@ -26,8 +26,9 @@ function createDialog(): HTMLDialogElement {
 }
 
 function closeDialog(dialog: HTMLDialogElement, value: string): void {
+  if (!dialog.open) return;
   dialog.returnValue = value;
-  dialog.close();
+  dialog.close(value);
 }
 
 function isOpen(dialog: HTMLDialogElement): boolean {
@@ -75,6 +76,11 @@ export function confirmDialog(message: string, options: ConfirmOptions = {}): Pr
       event.preventDefault();
       closeDialog(dialog, "no");
     });
+    // Use pointerup as a WebKit fallback. Some Tauri WebViews can deliver the
+    // native dialog's focus state without dispatching a synthetic click when
+    // the dialog is created dynamically.
+    ok.addEventListener("pointerup", () => closeDialog(dialog, "yes"), { once: true });
+    cancel.addEventListener("pointerup", () => closeDialog(dialog, "no"), { once: true });
     dialog.showModal();
     ok.focus();
   });

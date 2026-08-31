@@ -30,7 +30,6 @@ const PET_HEIGHT: f64 = 208.0;
 const SPRITESHEET_WIDTH: u32 = 1536;
 const SPRITESHEET_HEIGHT: u32 = 2288;
 const CONFIG_FILE_NAME: &str = "config.json";
-const BUNDLED_CATALOG: &str = include_str!("../../public/pets/index.json");
 
 #[cfg(target_os = "macos")]
 mod macos_overlay {
@@ -645,15 +644,11 @@ struct AppState {
     ai: AiRuntime,
 }
 
-#[derive(Clone, Deserialize)]
-struct BundledCatalog {
-    pets: Vec<BundledPet>,
-}
-
-#[derive(Clone, Deserialize)]
+#[derive(Clone)]
 struct BundledPet {
     id: String,
     path: String,
+    manifest: PetManifest,
 }
 
 #[derive(Clone, Serialize)]
@@ -701,12 +696,6 @@ struct PetSettingsEvent {
     settings: PetSettings,
 }
 
-fn bundled_catalog() -> Vec<BundledPet> {
-    serde_json::from_str::<BundledCatalog>(BUNDLED_CATALOG)
-        .map(|catalog| catalog.pets)
-        .unwrap_or_default()
-}
-
 fn is_safe_id(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
@@ -721,6 +710,66 @@ fn is_safe_relative_path(value: &str) -> bool {
         && !value
             .split('/')
             .any(|part| part.is_empty() || part == ".." || part == ".")
+}
+
+/// Discover bundled pets from their own `pet.json` records. The frontend
+/// assets are copied into the Tauri resource directory for packaged builds;
+/// the source directory is the fallback used by `tauri dev`.
+fn bundled_pet_roots(app: &tauri::AppHandle) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        roots.push(resource_dir.join("pets"));
+    }
+    roots.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../public/pets")
+            .to_path_buf(),
+    );
+    let mut unique = HashSet::new();
+    roots.retain(|root| unique.insert(root.clone()));
+    roots
+}
+
+fn discover_bundled_pets(app: &tauri::AppHandle) -> Vec<BundledPet> {
+    let mut pets = Vec::new();
+    let mut seen_ids = HashSet::new();
+    for root in bundled_pet_roots(app) {
+        let Ok(entries) = fs::read_dir(root) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !is_safe_id(id) {
+                continue;
+            }
+            let Ok(manifest) = serde_json::from_slice::<PetManifest>(
+                &fs::read(path.join("pet.json")).unwrap_or_default(),
+            ) else {
+                continue;
+            };
+            if manifest.id != id
+                || manifest.sprite_version_number != 2
+                || !is_safe_relative_path(&manifest.spritesheet_path)
+                || !path.join(&manifest.spritesheet_path).is_file()
+                || !seen_ids.insert(id.to_string())
+            {
+                continue;
+            }
+            pets.push(BundledPet {
+                id: id.to_string(),
+                path: id.to_string(),
+                manifest,
+            });
+        }
+    }
+    pets.sort_by(|left, right| left.id.cmp(&right.id));
+    pets
 }
 
 fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -865,8 +914,10 @@ fn instance_id_from_label(label: &str) -> Option<String> {
     }
 }
 
-fn pet_is_bundled(pet_id: &str) -> Option<BundledPet> {
-    bundled_catalog().into_iter().find(|pet| pet.id == pet_id)
+fn pet_is_bundled(app: &tauri::AppHandle, pet_id: &str) -> Option<BundledPet> {
+    discover_bundled_pets(app)
+        .into_iter()
+        .find(|pet| pet.id == pet_id)
 }
 
 fn pet_is_imported(app: &tauri::AppHandle, pet_id: &str) -> Option<(PetManifest, Vec<u8>)> {
@@ -887,7 +938,7 @@ fn pet_is_imported(app: &tauri::AppHandle, pet_id: &str) -> Option<(PetManifest,
 }
 
 fn pet_exists(app: &tauri::AppHandle, pet_id: &str) -> bool {
-    pet_is_bundled(pet_id).is_some() || pet_is_imported(app, pet_id).is_some()
+    pet_is_bundled(app, pet_id).is_some() || pet_is_imported(app, pet_id).is_some()
 }
 
 fn mime_for_path(path: &str) -> &'static str {
@@ -986,22 +1037,10 @@ fn decode_dialogue(bytes: &[u8]) -> Result<PetDialogue, String> {
 }
 
 fn bundled_character_bytes(app: &tauri::AppHandle, pet_id: &str) -> Option<Vec<u8>> {
-    let bundled = pet_is_bundled(pet_id)?;
-    let candidates = [
-        app.path()
-            .resource_dir()
-            .ok()
-            .map(|path| path.join("pets").join(&bundled.path).join("character.json")),
-        Some(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../public/pets")
-                .join(&bundled.path)
-                .join("character.json"),
-        ),
-    ];
-    candidates
+    let bundled = pet_is_bundled(app, pet_id)?;
+    bundled_pet_roots(app)
         .into_iter()
-        .flatten()
+        .map(|root| root.join(&bundled.path).join("character.json"))
         .find_map(|path| fs::read(path).ok())
 }
 
@@ -1019,19 +1058,23 @@ fn load_pet_character(app: &tauri::AppHandle, pet_id: &str) -> Result<CharacterC
 
 fn installed_pets(app: &tauri::AppHandle, config: &AppConfig) -> Vec<InstalledPet> {
     let disabled: HashSet<&str> = config.disabled_pet_ids.iter().map(String::as_str).collect();
-    let mut result: Vec<InstalledPet> = bundled_catalog()
+    let mut result: Vec<InstalledPet> = discover_bundled_pets(app)
         .into_iter()
-        .map(|pet| InstalledPet {
-            id: pet.id.clone(),
-            display_name: String::new(),
-            description: String::new(),
-            sprite_version_number: 2,
-            spritesheet_path: "spritesheet.webp".to_string(),
-            source: "bundled".to_string(),
-            enabled: !disabled.contains(pet.id.as_str()),
-            preview_data_url: None,
-            path: Some(pet.path),
-            settings: settings_for_pet(config, &pet.id),
+        .map(|pet| {
+            let id = pet.id;
+            let manifest = pet.manifest;
+            InstalledPet {
+                id: id.clone(),
+                display_name: manifest.display_name,
+                description: manifest.description,
+                sprite_version_number: manifest.sprite_version_number,
+                spritesheet_path: manifest.spritesheet_path,
+                source: "bundled".to_string(),
+                enabled: !disabled.contains(id.as_str()),
+                preview_data_url: None,
+                path: Some(pet.path),
+                settings: settings_for_pet(config, &id),
+            }
         })
         .collect();
     let Ok(root) = imported_pets_path(app) else {
@@ -1471,7 +1514,7 @@ fn get_runtime_config(
             character,
         });
     }
-    let bundled = pet_is_bundled(&instance.pet_id)
+    let bundled = pet_is_bundled(&app, &instance.pet_id)
         .ok_or_else(|| "pet resource is not installed".to_string())?;
     let character = load_pet_character(&app, &instance.pet_id).unwrap_or_default();
     Ok(RuntimeConfig {
@@ -1870,7 +1913,8 @@ fn import_pet_package(
     } else {
         None
     };
-    if pet_is_bundled(&manifest.id).is_some() || pet_is_imported(&app, &manifest.id).is_some() {
+    if pet_is_bundled(&app, &manifest.id).is_some() || pet_is_imported(&app, &manifest.id).is_some()
+    {
         return Err(format!("宠物 id 已存在: {}", manifest.id));
     }
     let pet_root = imported_pets_path(&app)?.join(&manifest.id);
@@ -1903,25 +1947,58 @@ fn import_pet_package(
 
 #[tauri::command]
 fn remove_imported_pet(app: tauri::AppHandle, pet_id: String) -> Result<Vec<InstalledPet>, String> {
-    if pet_is_bundled(&pet_id).is_some() {
+    if pet_is_bundled(&app, &pet_id).is_some() {
         return Err("内置宠物不能删除，可以选择停用".to_string());
     }
-    if config_snapshot(&app)?
+    let previous_config = config_snapshot(&app)?;
+    let instance_ids: Vec<String> = previous_config
         .instances
         .iter()
-        .any(|instance| instance.pet_id == pet_id)
-    {
-        return Err("请先移除使用这只宠物的实例".to_string());
+        .filter(|instance| instance.pet_id == pet_id)
+        .map(|instance| instance.id.clone())
+        .collect();
+    if instance_ids.iter().any(|id| id == "main") {
+        return Err("默认宠物不能删除，请先更换默认宠物".to_string());
     }
     let path = imported_pets_path(&app)?.join(&pet_id);
     if !path.exists() {
         return Err("找不到这只导入的宠物".to_string());
     }
-    fs::remove_dir_all(path).map_err(|error| format!("删除宠物失败: {error}"))?;
+
+    // Removing a resource also removes its display instances. Otherwise the
+    // manager appears to accept the confirmation but the old instance keeps
+    // the resource referenced and the backend rejects the deletion.
     let config = update_config(&app, |config| {
+        config
+            .instances
+            .retain(|instance| instance.pet_id != pet_id);
         config.disabled_pet_ids.retain(|id| id != &pet_id);
         Ok(())
     })?;
+
+    if let Err(error) = fs::remove_dir_all(&path) {
+        // Restore the configuration if the resource itself could not be
+        // deleted, so a transient filesystem error does not lose instances.
+        let restore_result = update_config(&app, |config| {
+            *config = previous_config.clone();
+            Ok(())
+        });
+        return Err(match restore_result {
+            Ok(_) => format!("删除宠物失败: {error}"),
+            Err(restore_error) => {
+                format!("删除宠物失败: {error}；恢复配置失败: {restore_error}")
+            }
+        });
+    }
+
+    for instance_id in instance_ids {
+        if let Some(window) = app.get_webview_window(&instance_label(&instance_id)?) {
+            window
+                .close()
+                .map_err(|error| format!("宠物资源已删除，但关闭显示窗口失败: {error}"))?;
+        }
+    }
+    sync_macos_activation_policy(&app, &config)?;
     rebuild_tray_menu(&app).map_err(|error| error.to_string())?;
     Ok(installed_pets(&app, &config))
 }

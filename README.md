@@ -201,8 +201,3 @@ app_data/ai/
 `pet.json` 必须使用 `spriteVersionNumber: 2`，spritesheet 必须是 8×11 网格、
 每格 192×208 像素，即 1536×2288 像素。`id` 只能使用字母、数字、短横线和
 下划线，且需要与 `pet.json` 内的 `id` 一致。
-
-## 资源目录
-
-内置宠物放在 `public/pets/<id>/`，列表在 `public/pets/index.json`。每个内置
-宠物都需要包含 `pet.json` 和 `spritesheet.webp`，可选包含 `character.json`。

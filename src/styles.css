@@ -63,7 +63,8 @@ body {
   font-weight: 700;
   line-height: 1.35;
   opacity: 0;
-  pointer-events: none;
+  cursor: pointer;
+  pointer-events: auto;
   text-align: center;
   transform: translateY(-4px) scale(0.98);
   transition: opacity 180ms ease, transform 180ms ease;

@@ -10,11 +10,12 @@ import { PetStateMachine, type PetAction } from "./pet/stateMachine";
 import { attachDrag, attachGestures, dragState, type DragDirection, type Gesture } from "./pet/window";
 import { PetWalker } from "./pet/walker";
 import type { PetDialogue, PetSettings, PetSettingsEvent, RuntimeConfig } from "./pet/config";
-import { DEFAULT_DIALOGUE, loadDialogue } from "./pet/dialogue";
+import { DEFAULT_DIALOGUE } from "./pet/dialogue";
 
 const PETS_BASE = import.meta.env.BASE_URL + "pets";
 type DialogueTrigger = Exclude<keyof PetDialogue, "version">;
 const IDLE_SPEECH_DELAY_MS = 90_000;
+const PET_BUBBLE_MAX_CHARS = 100;
 
 async function boot(): Promise<void> {
   const window = getCurrentWindow();
@@ -29,9 +30,6 @@ async function boot(): Promise<void> {
 
   const initialPet = await loadRuntimePet();
   let dialogue = runtime.dialogue ?? DEFAULT_DIALOGUE;
-  if (runtime.source === "bundled" && runtime.path) {
-    dialogue = await loadDialogue(`${PETS_BASE}/${runtime.path}`);
-  }
   let settings: PetSettings = runtime.settings;
   const stage = document.querySelector<HTMLCanvasElement>("#stage")!;
   const petEl = document.querySelector<HTMLElement>("#pet")!;
@@ -63,14 +61,20 @@ async function boot(): Promise<void> {
   let idleSpeechTimer: number | undefined;
   let clickTimer: number | undefined;
   let dragDialogueShown = false;
+  let chatRequestId: string | null = null;
+  let chatReply = "";
 
-  const sayLine = (trigger: DialogueTrigger): void => {
-    if (paused || settings.quietMode) return;
-    const lines = dialogue[trigger];
-    if (!lines.length) return;
-    const index = dialogueIndices[trigger] % lines.length;
-    speechText.textContent = lines[index];
-    dialogueIndices[trigger] += 1;
+  const speechPreview = (text: string): string => {
+    const chars = [...text.trim()];
+    return chars.length > PET_BUBBLE_MAX_CHARS
+      ? `${chars.slice(0, PET_BUBBLE_MAX_CHARS - 1).join("")}…`
+      : chars.join("");
+  };
+
+  const showSpeech = (text: string, duration: number): void => {
+    const preview = speechPreview(text);
+    if (!preview) return;
+    speechText.textContent = preview;
     speech.hidden = false;
     speech.classList.add("speech-visible");
     if (speechTimer !== undefined) globalThis.clearTimeout(speechTimer);
@@ -79,7 +83,16 @@ async function boot(): Promise<void> {
       speechTimer = globalThis.setTimeout(() => {
         speech.hidden = true;
       }, 180);
-    }, 3600);
+    }, duration);
+  };
+
+  const sayLine = (trigger: DialogueTrigger): void => {
+    if (paused || settings.quietMode) return;
+    const lines = dialogue[trigger];
+    if (!lines.length) return;
+    const index = dialogueIndices[trigger] % lines.length;
+    dialogueIndices[trigger] += 1;
+    showSpeech(lines[index], 3600);
   };
 
   const scheduleIdleSpeech = (): void => {
@@ -149,6 +162,17 @@ async function boot(): Promise<void> {
     }
   };
 
+  const openPetChat = async (): Promise<void> => {
+    try {
+      await invoke("open_pet_chat", { petId: runtime.petId });
+    } catch (error) {
+      console.error("failed to open pet chat:", error);
+      sayLine("doubleClick");
+    }
+  };
+
+  speech.addEventListener("click", () => void openPetChat());
+
   const playAction = (action: PetAction): void => {
     if (paused || dragging || !stateMachine.startAction(action)) return;
     engine.setLook(null);
@@ -206,7 +230,7 @@ async function boot(): Promise<void> {
       globalThis.clearTimeout(clickTimer);
       clickTimer = undefined;
     }
-    sayLine("doubleClick");
+    void openPetChat();
     playAction("jumping");
   });
 
@@ -231,6 +255,31 @@ async function boot(): Promise<void> {
     if (payload === "open-manager") {
       void openPetManager();
     }
+  });
+  await listen<{ requestId: string; petId: string; delta: string }>("chat://delta", ({ payload }) => {
+    if (payload.petId !== runtime.petId) return;
+    if (chatRequestId !== null && payload.requestId !== chatRequestId) return;
+    chatRequestId ??= payload.requestId;
+    chatReply += payload.delta;
+    showSpeech(chatReply, 7_000);
+  });
+  await listen<{ requestId: string; petId: string; message: { content: string; source: string } }>("chat://complete", ({ payload }) => {
+    if (payload.petId !== runtime.petId) return;
+    if (payload.message.source === "heartbeat") {
+      showSpeech(payload.message.content, 5_200);
+      return;
+    }
+    if (chatRequestId !== null && payload.requestId !== chatRequestId) return;
+    chatRequestId = null;
+    chatReply = "";
+    showSpeech(payload.message.content, 7_000);
+  });
+  await listen<{ requestId: string; petId: string; message: string }>("chat://error", ({ payload }) => {
+    if (payload.petId !== runtime.petId) return;
+    if (chatRequestId !== null && payload.requestId !== chatRequestId) return;
+    chatRequestId = null;
+    chatReply = "";
+    showSpeech(`刚才没听清……${payload.message}`, 5_200);
   });
 
   document.title = initialPet.manifest.displayName;

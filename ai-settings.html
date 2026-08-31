@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI 设置</title>
+    <link rel="stylesheet" href="/src/manager.css" />
+  </head>
+  <body>
+    <main class="manager ai-settings-page">
+      <header class="manager-header">
+        <div>
+          <p class="eyebrow">AI COMPANION</p>
+          <h1>AI 设置</h1>
+          <p class="subtitle">聊天、记忆、heartbeat 和桌面视觉的全局设置。所有宠物共享模型配置，但聊天经历彼此独立。</p>
+        </div>
+        <div class="header-actions">
+          <button id="open-pet-manager" class="secondary-button" type="button">宠物管理</button>
+        </div>
+      </header>
+
+      <p id="status" class="status" role="status">正在读取 AI 设置…</p>
+
+      <section class="ai-settings-panel" aria-labelledby="ai-settings-title">
+        <div class="ai-settings-heading">
+          <div>
+            <p class="eyebrow">GLOBAL SETTINGS</p>
+            <h2 id="ai-settings-title">模型连接</h2>
+            <p>API Key 只保存到系统密钥环，配置文件不会保存密钥正文。</p>
+          </div>
+          <label class="ai-switch"><input id="ai-enabled" type="checkbox" /> 启用聊天</label>
+        </div>
+
+        <div class="model-config-grid">
+          <fieldset class="model-card">
+            <legend>聊天模型</legend>
+            <p class="field-helper">用于宠物对话、heartbeat 台词、摘要和记忆提取。</p>
+            <div class="ai-form-grid">
+              <label><span>接口适配器</span><select id="chat-provider" data-provider-select></select></label>
+              <label><span>模型名称</span><input id="chat-model" autocomplete="off" placeholder="例如 gpt-4.1-mini、claude-3-5-sonnet" /></label>
+              <label class="wide-field"><span>Base URL</span><input id="chat-base-url" autocomplete="url" placeholder="例如 https://api.openai.com/v1" /></label>
+              <label class="credential-field wide-field"><span>API Key</span><div><input id="chat-key" type="password" autocomplete="new-password" placeholder="留空保持已保存的 Key" /><button id="clear-chat-key" class="small-button" type="button">删除已保存 Key</button></div></label>
+            </div>
+            <div class="ai-actions">
+              <button id="test-chat-provider" class="secondary-button" type="button">测试聊天模型</button>
+            </div>
+          </fieldset>
+
+          <fieldset class="model-card vision-card">
+            <legend>桌面视觉模型</legend>
+            <label class="ai-switch model-enable"><input id="vision-enabled" type="checkbox" /> 使用独立视觉模型</label>
+            <p class="field-helper">视觉模型可以使用不同的模型名、Base URL、协议和 Key。模型名称不会由应用预设或自动复制。</p>
+            <div class="ai-form-grid">
+              <label><span>接口适配器</span><select id="vision-provider" data-provider-select></select></label>
+              <label><span>模型名称</span><input id="vision-model" autocomplete="off" placeholder="按服务商填写视觉模型名称" /></label>
+              <label class="wide-field"><span>Base URL</span><input id="vision-base-url" autocomplete="url" placeholder="可填写与聊天不同的视觉接口地址" /></label>
+              <label class="credential-field wide-field"><span>API Key</span><div><input id="vision-key" type="password" autocomplete="new-password" placeholder="留空使用聊天 Key 或已保存的视觉 Key" /><button id="clear-vision-key" class="small-button" type="button">删除已保存 Key</button></div></label>
+            </div>
+            <div class="ai-actions">
+              <button id="test-vision-provider" class="secondary-button" type="button">测试视觉模型</button>
+            </div>
+          </fieldset>
+        </div>
+
+        <div class="settings-section">
+          <div class="section-heading">
+            <div>
+              <h3>陪伴行为</h3>
+              <p>这些开关影响所有已启用的宠物。</p>
+            </div>
+          </div>
+          <div class="ai-options">
+            <label><input id="memory-enabled" type="checkbox" /> 记住重要信息</label>
+            <label><input id="heartbeat-enabled" type="checkbox" /> 允许 heartbeat</label>
+            <label><input id="desktop-vision-enabled" type="checkbox" /> 允许宠物查看桌面</label>
+          </div>
+          <div class="ai-timing-grid">
+            <label><span>最近消息数</span><input id="max-recent-messages" type="number" min="2" max="40" step="1" /></label>
+            <label><span>Heartbeat 最短间隔（分钟）</span><input id="heartbeat-minutes" type="number" min="1" max="1440" step="1" /></label>
+            <label><span>Heartbeat 最长间隔（分钟）</span><input id="heartbeat-max-minutes" type="number" min="1" max="1440" step="1" /></label>
+            <label><span>视觉截图概率</span><input id="heartbeat-vision-chance" type="number" min="0" max="1" step="0.05" /></label>
+          </div>
+        </div>
+
+        <div class="ai-actions settings-actions">
+          <button id="save-ai-settings" class="primary-button" type="button">保存 AI 设置</button>
+        </div>
+        <p id="ai-status" class="helper-text" aria-live="polite">桌面截图只会在内存中短暂处理，不会保存到磁盘。</p>
+
+        <div class="memory-panel">
+          <div class="memory-heading">
+            <div>
+              <h3>本地记忆</h3>
+              <p>只保存在这台设备。共享资料会被所有宠物使用，经历按宠物分别保存。</p>
+            </div>
+            <div class="memory-actions">
+              <select id="memory-pet" aria-label="选择要查看记忆的宠物"></select>
+              <button id="refresh-memories" class="small-button" type="button">刷新</button>
+              <button id="clear-memories" class="small-button danger-button" type="button">清空</button>
+            </div>
+          </div>
+          <div id="memory-list" class="memory-list" aria-live="polite">
+            <p class="helper-text">正在读取记忆…</p>
+          </div>
+          <form id="memory-form" class="memory-form">
+            <label for="new-memory">手动记住一件事</label>
+            <div>
+              <input id="new-memory" maxlength="300" placeholder="例如：用户喜欢粉蓝色的界面" />
+              <button class="secondary-button" type="submit">记住</button>
+            </div>
+          </form>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="/src/ai-settings.ts"></script>
+  </body>
+</html>

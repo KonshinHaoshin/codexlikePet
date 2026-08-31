@@ -56,4 +56,60 @@ export interface RuntimeConfig {
   spritesheetDataUrl: string | null;
   settings: PetSettings;
   dialogue: PetDialogue;
+  character?: CharacterCard;
+}
+
+export interface CharacterCard {
+  name: string;
+  description: string;
+  personality: string;
+  scenario: string;
+  firstMes: string;
+  mesExample: string;
+  systemPrompt: string;
+  postHistoryInstructions: string;
+}
+
+export type ProviderKind = "openai-responses" | "anthropic-messages" | "openai-compatible";
+
+export interface ModelEndpointConfig {
+  provider: ProviderKind;
+  baseUrl: string;
+  model: string;
+  credentialRef: string | null;
+  maxOutputTokens: number;
+}
+
+export interface AiSettings {
+  enabled: boolean;
+  chatModel: ModelEndpointConfig | null;
+  visionModel: ModelEndpointConfig | null;
+  memoryEnabled: boolean;
+  maxRecentMessages: number;
+  heartbeatEnabled: boolean;
+  heartbeatMinMinutes: number;
+  heartbeatMaxMinutes: number;
+  heartbeatVisionChance: number;
+  desktopVisionEnabled: boolean;
+}
+
+export interface MemoryFact {
+  id: string;
+  content: string;
+  kind: string;
+  scope: string;
+  importance: number;
+  confidence: number;
+  createdAt: number;
+  updatedAt: number;
+  status: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  timestamp: number;
+  source: string;
+  visionSummary?: string | null;
 }

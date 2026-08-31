@@ -1,6 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
 import { CELL_HEIGHT, CELL_WIDTH, type PetManifest } from "./pet/atlas";
-import type { InstalledPetInfo, PetInstanceInfo, PetSettings } from "./pet/config";
+import type {
+  InstalledPetInfo,
+  PetInstanceInfo,
+  PetSettings,
+} from "./pet/config";
 
 const PETS_BASE = import.meta.env.BASE_URL + "pets";
 const PREVIEW_WIDTH = 96;
@@ -21,6 +25,7 @@ const status = document.querySelector<HTMLElement>("#status")!;
 const refreshButton = document.querySelector<HTMLButtonElement>("#refresh")!;
 const importButton = document.querySelector<HTMLButtonElement>("#import-pet")!;
 const importInput = document.querySelector<HTMLInputElement>("#pet-package")!;
+const openAiSettingsButton = document.querySelector<HTMLButtonElement>("#open-ai-settings")!;
 const settingsDialog = document.querySelector<HTMLDialogElement>("#pet-settings-dialog")!;
 const settingsDialogTitle = document.querySelector<HTMLElement>("#settings-dialog-title")!;
 const settingsDialogContent = document.querySelector<HTMLElement>("#settings-dialog-content")!;
@@ -529,6 +534,16 @@ function toBase64(bytes: Uint8Array): string {
 }
 
 refreshButton.addEventListener("click", () => void reloadAll());
+openAiSettingsButton.addEventListener("click", async () => {
+  setBusy(openAiSettingsButton, true);
+  try {
+    await invoke("open_ai_settings");
+  } catch (error) {
+    setStatus(errorMessage(error), "error");
+  } finally {
+    setBusy(openAiSettingsButton, false);
+  }
+});
 importButton.addEventListener("click", () => importInput.click());
 importInput.addEventListener("change", async () => {
   const file = importInput.files?.[0];

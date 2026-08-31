@@ -15,6 +15,8 @@ export default defineConfig(async () => ({
       input: {
         main: "index.html",
         manager: "manager.html",
+        "ai-settings": "ai-settings.html",
+        chat: "chat.html",
       },
     },
   },

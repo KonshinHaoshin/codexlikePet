@@ -20,6 +20,9 @@ use tauri::{
 };
 use zip::ZipArchive;
 
+mod ai;
+use ai::{AiRuntime, AiSettings};
+
 const LOOK_MARGIN_LOGICAL: f64 = 72.0;
 const LOOK_DEADZONE_LOGICAL: f64 = 60.0;
 const PET_WIDTH: f64 = 192.0;
@@ -444,6 +447,133 @@ struct PetDialogue {
     idle: Vec<String>,
 }
 
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct CharacterCard {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    personality: String,
+    #[serde(default)]
+    scenario: String,
+    #[serde(rename = "first_mes", default)]
+    first_mes: String,
+    #[serde(rename = "mes_example", default)]
+    mes_example: String,
+    #[serde(rename = "creator_notes", default)]
+    creator_notes: String,
+    #[serde(rename = "system_prompt", default)]
+    system_prompt: String,
+    #[serde(rename = "post_history_instructions", default)]
+    post_history_instructions: String,
+    #[serde(rename = "alternate_greetings", default)]
+    alternate_greetings: Vec<String>,
+    #[serde(rename = "character_book", default)]
+    character_book: Option<CharacterBook>,
+    #[serde(default)]
+    extensions: serde_json::Value,
+    #[serde(default)]
+    dialogue: PetDialogue,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+struct CharacterBook {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    scan_depth: usize,
+    #[serde(default)]
+    token_budget: usize,
+    #[serde(default)]
+    recursive_scanning: bool,
+    #[serde(default)]
+    extensions: serde_json::Value,
+    #[serde(default)]
+    entries: Vec<CharacterBookEntry>,
+}
+
+#[derive(Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+struct CharacterBookEntry {
+    #[serde(default)]
+    keys: Vec<String>,
+    #[serde(default)]
+    secondary_keys: Vec<String>,
+    #[serde(default)]
+    content: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    #[serde(default)]
+    insertion_order: i64,
+    #[serde(default)]
+    case_sensitive: bool,
+    #[serde(default)]
+    selective: bool,
+    #[serde(default)]
+    constant: bool,
+    #[serde(default)]
+    priority: i64,
+    #[serde(default)]
+    position: String,
+    #[serde(default)]
+    extensions: serde_json::Value,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl CharacterCard {
+    fn relevant_lorebook(&self, query: &str) -> String {
+        let Some(book) = &self.character_book else {
+            return String::new();
+        };
+        let query = query.to_lowercase();
+        let mut entries: Vec<&CharacterBookEntry> = book
+            .entries
+            .iter()
+            .filter(|entry| {
+                if !entry.enabled || entry.content.trim().is_empty() {
+                    return false;
+                }
+                if entry.constant {
+                    return true;
+                }
+                let matches_key = |key: &str| {
+                    if entry.case_sensitive {
+                        query.contains(key)
+                    } else {
+                        query.contains(&key.to_lowercase())
+                    }
+                };
+                let primary = entry.keys.iter().any(|key| matches_key(key));
+                let secondary = entry.secondary_keys.iter().any(|key| matches_key(key));
+                primary && (!entry.selective || secondary)
+            })
+            .collect();
+        entries.sort_by_key(|entry| (entry.priority, entry.insertion_order));
+        let budget = if book.token_budget == 0 {
+            1_200
+        } else {
+            book.token_budget * 4
+        };
+        let mut output = String::new();
+        for entry in entries {
+            if output.len() + entry.content.len() > budget {
+                break;
+            }
+            output.push_str(&entry.content);
+            output.push('\n');
+        }
+        output
+    }
+}
+
 impl Default for PetDialogue {
     fn default() -> Self {
         Self {
@@ -485,6 +615,10 @@ struct AppConfig {
     instances: Vec<PetInstanceConfig>,
     disabled_pet_ids: Vec<String>,
     next_instance_id: u64,
+    #[serde(default)]
+    ai: AiSettings,
+    #[serde(default)]
+    chat_positions: HashMap<String, PetPosition>,
 }
 
 impl Default for AppConfig {
@@ -500,12 +634,15 @@ impl Default for AppConfig {
             }],
             disabled_pet_ids: Vec::new(),
             next_instance_id: 2,
+            ai: AiSettings::default(),
+            chat_positions: HashMap::new(),
         }
     }
 }
 
 struct AppState {
     config: Mutex<AppConfig>,
+    ai: AiRuntime,
 }
 
 #[derive(Clone, Deserialize)]
@@ -554,6 +691,7 @@ struct RuntimeConfig {
     spritesheet_data_url: Option<String>,
     settings: PetSettings,
     dialogue: PetDialogue,
+    character: CharacterCard,
 }
 
 #[derive(Clone, Serialize)]
@@ -637,6 +775,9 @@ fn normalize_config(config: &mut AppConfig) {
     config.disabled_pet_ids.retain(|id| is_safe_id(id));
     config.settings = clamp_settings(config.settings.clone());
     config.pet_settings.retain(|id, _| is_safe_id(id));
+    config
+        .chat_positions
+        .retain(|id, position| is_safe_id(id) && position.x.is_finite() && position.y.is_finite());
     for settings in config.pet_settings.values_mut() {
         *settings = clamp_settings(settings.clone());
     }
@@ -662,6 +803,10 @@ fn save_config(app: &tauri::AppHandle, config: &AppConfig) -> Result<(), String>
     let bytes = serde_json::to_vec_pretty(config)
         .map_err(|error| format!("failed to encode config: {error}"))?;
     fs::write(&temp_path, bytes).map_err(|error| format!("failed to write config: {error}"))?;
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| format!("failed to replace config: {error}"))?;
+    }
     fs::rename(&temp_path, &path).map_err(|error| format!("failed to replace config: {error}"))
 }
 
@@ -785,15 +930,40 @@ fn normalize_dialogue(mut dialogue: PetDialogue) -> PetDialogue {
     dialogue
 }
 
-fn decode_dialogue(bytes: &[u8]) -> Result<PetDialogue, String> {
-    if bytes.len() > 32 * 1024 {
-        return Err("character.json 不能超过 32 KB".to_string());
+fn decode_character(bytes: &[u8]) -> Result<CharacterCard, String> {
+    if bytes.len() > 1024 * 1024 {
+        return Err("character.json 不能超过 1 MB".to_string());
     }
-    let dialogue = serde_json::from_slice::<PetDialogue>(bytes)
+    let value = serde_json::from_slice::<serde_json::Value>(bytes)
         .map_err(|error| format!("character.json 格式错误: {error}"))?;
-    if dialogue.version != 1 {
-        return Err("只支持 character.json version: 1".to_string());
-    }
+    let is_v2 = value.get("spec").and_then(serde_json::Value::as_str) == Some("chara_card_v2")
+        && value.get("data").is_some();
+    let mut card = if is_v2 {
+        let data = value.get("data").cloned().unwrap_or_default();
+        let extensions = data
+            .get("extensions")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let dialogue = extensions
+            .get("sakipet")
+            .and_then(|value| value.get("dialogue"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({ "version": 1 }));
+        let mut card = serde_json::from_value::<CharacterCard>(data)
+            .map_err(|error| format!("character.json V2 格式错误: {error}"))?;
+        card.extensions = extensions;
+        card.dialogue = serde_json::from_value(dialogue)
+            .map_err(|error| format!("character.json 静态台词格式错误: {error}"))?;
+        card
+    } else {
+        let dialogue = serde_json::from_value::<PetDialogue>(value.clone())
+            .map_err(|error| format!("character.json V1 格式错误: {error}"))?;
+        CharacterCard {
+            dialogue,
+            ..CharacterCard::default()
+        }
+    };
+    let dialogue = normalize_dialogue(card.dialogue.clone());
     let too_long = [
         &dialogue.double_click,
         &dialogue.click,
@@ -807,17 +977,44 @@ fn decode_dialogue(bytes: &[u8]) -> Result<PetDialogue, String> {
     if too_long {
         return Err("character.json 中的单句台词不能超过 240 个字符".to_string());
     }
-    Ok(normalize_dialogue(dialogue))
+    card.dialogue = dialogue;
+    Ok(card)
 }
 
-fn imported_pet_dialogue(app: &tauri::AppHandle, pet_id: &str) -> PetDialogue {
-    let Some(root) = imported_pets_path(app).ok().map(|path| path.join(pet_id)) else {
-        return PetDialogue::default();
+fn decode_dialogue(bytes: &[u8]) -> Result<PetDialogue, String> {
+    Ok(decode_character(bytes)?.dialogue)
+}
+
+fn bundled_character_bytes(app: &tauri::AppHandle, pet_id: &str) -> Option<Vec<u8>> {
+    let bundled = pet_is_bundled(pet_id)?;
+    let candidates = [
+        app.path()
+            .resource_dir()
+            .ok()
+            .map(|path| path.join("pets").join(&bundled.path).join("character.json")),
+        Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../public/pets")
+                .join(&bundled.path)
+                .join("character.json"),
+        ),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find_map(|path| fs::read(path).ok())
+}
+
+fn load_pet_character(app: &tauri::AppHandle, pet_id: &str) -> Result<CharacterCard, String> {
+    let bytes = if let Some(root) = imported_pets_path(app).ok().map(|path| path.join(pet_id)) {
+        fs::read(root.join("character.json")).ok()
+    } else {
+        None
     };
-    fs::read(root.join("character.json"))
-        .ok()
-        .and_then(|bytes| decode_dialogue(&bytes).ok())
-        .unwrap_or_default()
+    let bytes = bytes.or_else(|| bundled_character_bytes(app, pet_id));
+    Ok(bytes
+        .and_then(|bytes| decode_character(&bytes).ok())
+        .unwrap_or_default())
 }
 
 fn installed_pets(app: &tauri::AppHandle, config: &AppConfig) -> Vec<InstalledPet> {
@@ -1127,9 +1324,100 @@ fn show_pet_manager(app: &tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+fn show_ai_settings(app: &tauri::AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("ai-settings") else {
+        return Err("AI settings window is not available".to_string());
+    };
+    window
+        .show()
+        .map_err(|error| format!("failed to show AI settings: {error}"))?;
+    window
+        .set_focus()
+        .map_err(|error| format!("failed to focus AI settings: {error}"))?;
+    Ok(())
+}
+
+fn chat_window_label(pet_id: &str) -> Result<String, String> {
+    if !is_safe_id(pet_id) {
+        return Err("invalid pet id".to_string());
+    }
+    Ok(format!("pet-chat-{pet_id}"))
+}
+
+#[tauri::command]
+fn open_pet_chat(app: tauri::AppHandle, pet_id: String) -> Result<(), String> {
+    if !pet_exists(&app, &pet_id) {
+        return Err("宠物资源不存在或校验失败".to_string());
+    }
+    let label = chat_window_label(&pet_id)?;
+    if let Some(window) = app.get_webview_window(&label) {
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let config = config_snapshot(&app)?;
+    let position = config
+        .chat_positions
+        .get(&pet_id)
+        .map(|position| (position.x, position.y))
+        .or_else(|| {
+            config
+                .instances
+                .iter()
+                .find(|instance| instance.pet_id == pet_id)
+                .and_then(|instance| instance.position.clone())
+                .map(|position| (position.x - 114.0, position.y + PET_HEIGHT + 12.0))
+        })
+        .unwrap_or((240.0, 390.0));
+    let window = WebviewWindowBuilder::new(
+        &app,
+        &label,
+        WebviewUrl::App(format!("chat.html?petId={pet_id}").into()),
+    )
+    .title("")
+    .inner_size(320.0, 170.0)
+    .position(position.0, position.1)
+    .decorations(true)
+    .always_on_top(true)
+    .skip_taskbar(false)
+    .resizable(true)
+    .visible(true)
+    .build()
+    .map_err(|error| format!("failed to create pet chat window: {error}"))?;
+    let app_for_move = app.clone();
+    let pet_id_for_move = pet_id.clone();
+    let window_for_move = window.clone();
+    window.on_window_event(move |event| {
+        if let WindowEvent::Moved(position) = event {
+            let Ok(scale_factor) = window_for_move.scale_factor() else {
+                return;
+            };
+            let logical = PetPosition {
+                x: position.x as f64 / scale_factor,
+                y: position.y as f64 / scale_factor,
+            };
+            if let Err(error) = update_config(&app_for_move, |config| {
+                config
+                    .chat_positions
+                    .insert(pet_id_for_move.clone(), logical.clone());
+                Ok(())
+            }) {
+                eprintln!("failed to save pet chat position: {error}");
+            }
+        }
+    });
+    window.set_focus().map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn open_pet_manager(app: tauri::AppHandle) -> Result<(), String> {
     show_pet_manager(&app)
+}
+
+#[tauri::command]
+fn open_ai_settings(app: tauri::AppHandle) -> Result<(), String> {
+    show_ai_settings(&app)
 }
 
 #[tauri::command]
@@ -1170,6 +1458,7 @@ fn get_runtime_config(
         .find(|instance| instance.id == instance_id)
         .ok_or_else(|| "pet instance is not configured".to_string())?;
     if let Some((manifest, sprite)) = pet_is_imported(&app, &instance.pet_id) {
+        let character = load_pet_character(&app, &instance.pet_id).unwrap_or_default();
         return Ok(RuntimeConfig {
             instance_id,
             pet_id: instance.pet_id.clone(),
@@ -1178,11 +1467,13 @@ fn get_runtime_config(
             manifest: Some(manifest.clone()),
             spritesheet_data_url: Some(data_url(&manifest.spritesheet_path, &sprite)),
             settings: settings_for_pet(&config, &instance.pet_id),
-            dialogue: imported_pet_dialogue(&app, &instance.pet_id),
+            dialogue: character.dialogue.clone(),
+            character,
         });
     }
     let bundled = pet_is_bundled(&instance.pet_id)
         .ok_or_else(|| "pet resource is not installed".to_string())?;
+    let character = load_pet_character(&app, &instance.pet_id).unwrap_or_default();
     Ok(RuntimeConfig {
         instance_id,
         pet_id: instance.pet_id.clone(),
@@ -1191,7 +1482,8 @@ fn get_runtime_config(
         manifest: None,
         spritesheet_data_url: None,
         settings: settings_for_pet(&config, &instance.pet_id),
-        dialogue: PetDialogue::default(),
+        dialogue: character.dialogue.clone(),
+        character,
     })
 }
 
@@ -1650,16 +1942,28 @@ fn toggle_all_visibility(app: &tauri::AppHandle) -> Result<(), String> {
 
 fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<()> {
     let manage_pets = MenuItem::with_id(app, "app-manage-pets", "管理宠物", true, None::<&str>)?;
-    let app_submenu =
-        Submenu::with_id_and_items(app, "sakipet-app-menu", "SakiPet", true, &[&manage_pets])?;
+    let ai_settings = MenuItem::with_id(app, "app-ai-settings", "AI 设置", true, None::<&str>)?;
+    let app_submenu = Submenu::with_id_and_items(
+        app,
+        "sakipet-app-menu",
+        "SakiPet",
+        true,
+        &[&manage_pets, &ai_settings],
+    )?;
     let menu = Menu::with_items(app, &[&app_submenu])?;
     app.set_menu(menu)?;
-    app.on_menu_event(|app, event| {
-        if event.id().as_ref() == "app-manage-pets" {
+    app.on_menu_event(|app, event| match event.id().as_ref() {
+        "app-manage-pets" => {
             if let Err(error) = show_pet_manager(app) {
                 eprintln!("{error}");
             }
         }
+        "app-ai-settings" => {
+            if let Err(error) = show_ai_settings(app) {
+                eprintln!("{error}");
+            }
+        }
+        _ => {}
     });
     Ok(())
 }
@@ -1673,7 +1977,7 @@ fn build_tray_menu(app: &tauri::AppHandle) -> tauri::Result<Menu<Wry>> {
         None::<&str>,
     )?;
     let manage_pets = MenuItem::with_id(app, "manage-pets", "管理宠物", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "pet-settings", "宠物设置", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "ai-settings", "AI 设置", true, None::<&str>)?;
     let toggle_pause = MenuItem::with_id(
         app,
         "toggle-pause",
@@ -1773,8 +2077,12 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
                 if let Err(error) = toggle_all_visibility(app) {
                     eprintln!("failed to toggle pet visibility: {error}");
                 }
-            } else if id == "manage-pets" || id == "pet-settings" {
+            } else if id == "manage-pets" {
                 if let Err(error) = show_pet_manager(app) {
+                    eprintln!("{error}");
+                }
+            } else if id == "ai-settings" {
+                if let Err(error) = show_ai_settings(app) {
                     eprintln!("{error}");
                 }
             } else if id == "toggle-pause" {
@@ -1903,12 +2211,14 @@ pub fn run() {
             let config = load_config(&app.handle());
             app.manage(AppState {
                 config: Mutex::new(config.clone()),
+                ai: AiRuntime::default(),
             });
             restore_windows(&app.handle(), &config)?;
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             start_fullscreen_overlay_guard(&app.handle());
             build_tray(&app.handle())?;
             build_app_menu(&app.handle())?;
+            ai::start_heartbeat_scheduler(&app.handle());
             #[cfg(target_os = "macos")]
             if let Err(error) = macos_dock_menu::install(&app.handle()) {
                 eprintln!("failed to install Dock menu: {error}");
@@ -1922,6 +2232,15 @@ pub fn run() {
                     }
                 });
             }
+            if let Some(settings) = app.get_webview_window("ai-settings") {
+                let settings_for_close = settings.clone();
+                settings.on_window_event(move |event| {
+                    if let WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        let _ = settings_for_close.hide();
+                    }
+                });
+            }
             if !has_visible_pet_config(&app.handle(), &config) {
                 show_pet_manager(&app.handle())?;
             }
@@ -1930,6 +2249,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             look_direction,
             open_pet_manager,
+            open_ai_settings,
+            open_pet_chat,
             get_pet_catalog,
             get_pet_settings,
             get_pet_instances,
@@ -1943,7 +2264,25 @@ pub fn run() {
             toggle_pet_pause,
             set_pet_enabled,
             import_pet_package,
-            remove_imported_pet
+            remove_imported_pet,
+            ai::get_ai_settings,
+            ai::update_ai_settings,
+            ai::set_ai_secret,
+            ai::delete_ai_secret,
+            ai::test_ai_provider,
+            ai::capture_desktop,
+            ai::get_chat_history,
+            ai::send_chat_message,
+            ai::cancel_chat_response,
+            ai::clear_chat_history,
+            ai::get_memories,
+            ai::delete_memory,
+            ai::update_memory,
+            ai::clear_memories,
+            ai::get_shared_memories,
+            ai::delete_shared_memory,
+            ai::update_shared_memory,
+            ai::clear_shared_memories
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -1961,4 +2300,72 @@ pub fn run() {
                 }
             }
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_legacy_character_dialogue() {
+        let card = decode_character(r#"{"version":1,"click":["你好"]}"#.as_bytes())
+            .expect("legacy card should parse");
+        assert_eq!(card.dialogue.click, vec!["你好"]);
+        assert!(!card.dialogue.idle.is_empty());
+    }
+
+    #[test]
+    fn parses_v2_prompt_and_preserves_extensions() {
+        let card = decode_character(
+            r#"{
+          "spec":"chara_card_v2",
+          "spec_version":"2.0",
+          "data":{
+            "name":"Saki",
+            "description":"一只猫",
+            "system_prompt":"保持简短",
+            "extensions":{"sakipet":{"dialogue":{"version":1,"idle":["喵"]}},"custom":{"keep":true}}
+          }
+        }"#
+            .as_bytes(),
+        )
+        .expect("v2 card should parse");
+        assert_eq!(card.name, "Saki");
+        assert_eq!(card.system_prompt, "保持简短");
+        assert_eq!(card.dialogue.idle, vec!["喵"]);
+        assert_eq!(card.extensions["custom"]["keep"], true);
+    }
+
+    #[test]
+    fn lorebook_only_inserts_triggered_entries() {
+        let card = CharacterCard {
+            character_book: Some(CharacterBook {
+                entries: vec![
+                    CharacterBookEntry {
+                        keys: vec!["加班".to_string()],
+                        content: "提醒休息".to_string(),
+                        enabled: true,
+                        ..CharacterBookEntry::default()
+                    },
+                    CharacterBookEntry {
+                        keys: vec!["旅行".to_string()],
+                        content: "带上相机".to_string(),
+                        enabled: true,
+                        ..CharacterBookEntry::default()
+                    },
+                ],
+                ..CharacterBook::default()
+            }),
+            ..CharacterCard::default()
+        };
+        let lore = card.relevant_lorebook("今天要加班");
+        assert!(lore.contains("提醒休息"));
+        assert!(!lore.contains("带上相机"));
+    }
+
+    #[test]
+    fn character_file_limit_is_one_megabyte() {
+        let bytes = vec![b' '; 1024 * 1024 + 1];
+        assert!(decode_character(&bytes).is_err());
+    }
 }

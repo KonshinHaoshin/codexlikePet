@@ -1,36 +1,25 @@
 # SakiPet
 
-一个基于 Tauri 2 + Rust + Vite/TypeScript 的透明桌面宠物。它默认长时间
-idle，偶尔散步或斜向上爬，也支持拖拽、局部视线跟随、多个宠物实例和本地配置保存。
+一个基于 Tauri 2 + Rust + Vite/TypeScript 的透明桌面宠物。使用类似codex格式的桌宠。
 
 ## 开发
 
 ```bash
-COPYFILE_DISABLE=1 npm install
-COPYFILE_DISABLE=1 npm run tauri dev
+npm install
+npm run tauri dev
 ```
+## 管理入口
 
-快速检查：
-
-```bash
-npm run build
-cd src-tauri && COPYFILE_DISABLE=1 cargo check
-```
-
-由于仓库位于 ExFAT 卷，Rust 的构建目录由
-`src-tauri/.cargo/config.toml` 重定向到本机缓存目录，避免 macOS 的
-AppleDouble `._*` 文件干扰 Tauri 构建。
-
-## 宠物管理
-
-启动后可以通过以下入口打开管理页：
+启动后可以通过以下入口打开宠物管理：
 
 - 桌宠图标的托盘菜单 → 管理宠物；
-- macOS Dock 图标右键菜单 → 管理宠物；
 - 菜单栏的 SakiPet 图标 → 管理宠物；
 - macOS 顶部菜单栏的 SakiPet → 管理宠物。
 
-双击桌宠会显示它的下一句台词，并触发一次互动动作。
+宠物管理和 AI 设置是两个独立窗口。宠物管理页只负责宠物资源、显示实例和每只宠物的独立设置；点击其中的“AI 设置”按钮，或从 SakiPet 菜单选择“AI 设置”，可以打开全局 AI 陪伴设置。
+
+双击桌宠会打开（或聚焦）这只宠物独立的聊天窗口；单击、拖拽、散步和长时间
+idle 仍然使用 `character.json` 中的静态台词。
 
 管理页支持：
 
@@ -41,18 +30,6 @@ AppleDouble `._*` 文件干扰 Tauri 构建。
 - 导入、校验和删除宠物资源。
 
 配置保存于 Tauri 的应用配置目录，宠物导入文件保存于应用数据目录下的
-`pets/`，不会写回仓库。
-
-### Windows 全屏与虚拟桌面
-
-Windows 下开启“全屏显示”后，宠物窗口会使用 `HWND_TOPMOST`，因此可以覆盖普通窗口和无边框全屏窗口；独占全屏游戏关闭桌面合成时，系统本身不允许普通桌面窗口覆盖，宠物也不会强行绕过这个限制。
-
-如果系统支持 Explorer 的虚拟桌面固定接口，宠物还会自动固定到所有虚拟桌面；接口不可用时会退化为当前虚拟桌面显示，不影响启动和普通使用。
-
-macOS 下开启“全屏显示”后，宠物窗口会提升为非激活的 `NSPanel`，加入所有
-Space 和其他应用的全屏 Space，并使用 `screenSaver` 窗口层级显示。应用使用
-`Accessory` 激活策略，因此不显示 Dock 图标；请通过 macOS 顶部菜单栏的 SakiPet
-托盘图标打开“管理宠物”。如果视频或应用使用独占显示输出，系统仍可能不允许普通桌面窗口覆盖。
 
 ## 导入宠物包
 
@@ -67,7 +44,53 @@ my-pet.zip
     └── spritesheet.webp
 ```
 
-可以额外放入 `character.json` 配置宠物在不同情况下显示的台词：
+可以额外放入 `character.json` 配置角色卡和不同情况下显示的静态台词。推荐使用
+Character Card V2：
+
+```json
+{
+  "spec": "chara_card_v2",
+  "spec_version": "2.0",
+  "data": {
+    "name": "Sakimiao",
+    "description": "一只喜欢陪伴用户的小猫。",
+    "personality": "温柔、好奇，偶尔吐槽，但不会打扰用户。",
+    "scenario": "你住在用户的桌面上，和用户一起工作。",
+    "system_prompt": "保持角色身份，回答简短自然的中文。",
+    "post_history_instructions": "不要声称可以操作用户的文件、Shell 或系统。",
+    "first_mes": "今天也来陪你啦。",
+    "mes_example": "<START>\n{{user}}: 你在做什么？\n{{char}}: 我在桌边陪着你呀。",
+    "character_book": {
+      "entries": [
+        {
+          "keys": ["加班", "熬夜"],
+          "content": "用户最近可能需要休息，提醒要温柔，不要说教。",
+          "enabled": true,
+          "constant": false,
+          "selective": false,
+          "insertion_order": 100
+        }
+      ]
+    },
+    "extensions": {
+      "sakipet": {
+        "dialogue": {
+          "version": 1,
+          "doubleClick": ["嗯？找我聊天吗？"],
+          "click": ["我在这里哦。"],
+          "rightClick": ["轻一点嘛。"],
+          "walk": ["我去附近转转。"],
+          "drag": ["要带我去哪里呀？"],
+          "idle": ["这里待着也很舒服。"]
+        }
+      },
+      "your_extension": { "保留": "未知扩展会原样保留" }
+    }
+  }
+}
+```
+
+也继续兼容原来的 V1 台词文件：
 
 ```json
 {
@@ -98,7 +121,15 @@ my-pet.zip
 }
 ```
 
-字段说明：
+V2 中会用于角色上下文的字段包括 `description`、`personality`、`scenario`、
+`system_prompt`、`post_history_instructions`、`mes_example`、`first_mes` 和
+`character_book`。`creator_notes` 只作为创作者备注，不会发送给模型；未知的
+`extensions` 会保留。应用级安全约束始终优先于角色卡，角色卡不能开启工具调用。
+
+静态台词位于 `data.extensions.sakipet.dialogue`；模型地址、API Key、聊天历史、
+记忆和 heartbeat 设置都保存在应用中，不要写进宠物包。
+
+V1 字段说明：
 
 - `version`：格式版本，目前必须为 `1`。
 - `doubleClick`：字符串数组。双击宠物时按顺序轮换显示。
@@ -112,11 +143,38 @@ my-pet.zip
 
 格式限制：
 
-- `character.json` 最大 32 KB；
+- `character.json` 最大 1 MB；
 - 每个台词数组最多 32 条台词；
 - 单条台词最多 240 个字符；
 - 空字符串会被忽略；
 - 缺少该文件、格式错误或没有有效台词时，会使用默认台词。
+
+未配置或模型不可用时，不会发起网络请求。AI 设置中可以配置 OpenAI Responses、
+Anthropic Messages 或 OpenAI-compatible Chat Completions，并可额外配置视觉模型。
+聊天模型和视觉模型的 API Key 使用系统密钥环保存，配置文件只保存引用。
+
+## 对话、记忆与桌面视觉
+
+AI 设置位于独立的“AI 设置”窗口。聊天窗口支持历史消息、流式回复、停止、
+重试和清空，窗口位置会在移动后保存。API Key 可以替换或从系统密钥环删除。
+聊天历史按宠物隔离，用户资料可以作为共享记忆；重要的宠物经历会写入本地 JSONL。
+超过 40 条消息后，应用会在后台更新摘要，完整消息仍然保留。
+
+heartbeat 默认保持安静并随机等待 20–60 分钟，宠物暂停、安静模式、最近有对话或
+正在生成回复时会跳过。桌面视觉默认关闭，开启后每小时最多截图一次，截图只在
+内存中处理：macOS 使用 CoreGraphics 排除 SakiPet 窗口，Windows 捕获鼠标所在
+显示器并遮盖 SakiPet 窗口，Linux 首版不支持。截图不会写入磁盘。
+
+AI 数据目录为：
+
+```text
+app_data/ai/
+├── profile.json
+└── pets/<petId>/
+    ├── messages.jsonl
+    ├── memories.jsonl
+    └── summary.json
+```
 
 `pet.json` 必须使用 `spriteVersionNumber: 2`，spritesheet 必须是 8×11 网格、
 每格 192×208 像素，即 1536×2288 像素。`id` 只能使用字母、数字、短横线和

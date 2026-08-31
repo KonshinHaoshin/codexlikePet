@@ -25,6 +25,7 @@ const MAX_HISTORY_MESSAGES: usize = 200;
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 static LAST_HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
 static LAST_VISION_MS: AtomicU64 = AtomicU64::new(0);
+static LAST_PET_CONVERSATION_MS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
@@ -69,6 +70,7 @@ pub(crate) struct AiSettings {
     pub heartbeat_max_minutes: u32,
     pub heartbeat_vision_chance: f64,
     pub desktop_vision_enabled: bool,
+    pub pet_conversation_enabled: bool,
 }
 
 impl Default for AiSettings {
@@ -84,6 +86,7 @@ impl Default for AiSettings {
             heartbeat_max_minutes: 60,
             heartbeat_vision_chance: 0.3,
             desktop_vision_enabled: false,
+            pet_conversation_enabled: true,
         }
     }
 }
@@ -97,6 +100,10 @@ pub(crate) struct ChatMessage {
     pub timestamp: u64,
     pub source: String,
     pub vision_summary: Option<String>,
+    #[serde(default)]
+    pub speaker_pet_id: Option<String>,
+    #[serde(default)]
+    pub speaker_name: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -112,6 +119,7 @@ pub(crate) struct PetLifeState {
     pub known_since: u64,
     pub interaction_count: u64,
     pub chat_count: u64,
+    pub pet_interaction_count: u64,
     pub next_action_at: u64,
 }
 
@@ -129,6 +137,7 @@ impl Default for PetLifeState {
             known_since: now,
             interaction_count: 0,
             chat_count: 0,
+            pet_interaction_count: 0,
             next_action_at: 0,
         }
     }
@@ -614,6 +623,13 @@ fn record_pet_interaction_internal(
                 state.mood = "curious".to_string();
                 state.activity = "watching".to_string();
             }
+            "pet-conversation" | "pet_conversation" => {
+                state.attention = state.attention.saturating_add(5).min(100);
+                state.bond = state.bond.saturating_add(1).min(100);
+                state.pet_interaction_count = state.pet_interaction_count.saturating_add(1);
+                state.mood = "social".to_string();
+                state.activity = "talking".to_string();
+            }
             _ => {
                 state.attention = state.attention.saturating_add(8).min(100);
                 state.bond = state.bond.saturating_add(1).min(100);
@@ -823,7 +839,7 @@ fn prompt_for(
         prompt.push_str(&format!("\n共享用户资料：\n{profile}\n"));
     }
     if !memories.is_empty() {
-        prompt.push_str("\n关于你们共同经历的记忆：\n");
+        prompt.push_str("\n关于你们共同经历的记忆（关系记忆优先）：\n");
         for memory in memories.iter().take(8) {
             prompt.push_str(&format!("- [{}] {}\n", memory.kind, memory.content));
         }
@@ -837,7 +853,7 @@ fn prompt_for(
         .unwrap_or(0)
         .saturating_add(1);
     prompt.push_str(&format!(
-        "\n当前宠物 ID：{pet_id}\n当前宠物状态：\n- 心情：{}\n- 精力：{} / 100\n- 注意力：{} / 100\n- 亲密度：{} / 100\n- 当前活动：{}\n- 认识用户：{} 天\n- 总互动次数：{}\n- 聊天次数：{}\n",
+        "\n当前宠物 ID：{pet_id}\n当前宠物状态：\n- 心情：{}\n- 精力：{} / 100\n- 注意力：{} / 100\n- 亲密度：{} / 100\n- 当前活动：{}\n- 认识用户：{} 天\n- 总互动次数：{}\n- 聊天次数：{}\n- 与其他宠物互动次数：{}\n",
         state.mood,
         state.energy,
         state.attention,
@@ -846,6 +862,7 @@ fn prompt_for(
         known_days,
         state.interaction_count,
         state.chat_count,
+        state.pet_interaction_count,
     ));
     prompt.push_str(
         "回复要求：使用自然简短的中文，保持角色语气。只返回 JSON，不要 Markdown 或解释，格式为 {\"say\":\"要说的话\",\"action\":\"idle|waving|jumping|waiting|review|walk|sleep\",\"mood\":\"当前心情\",\"look\":\"up|up-right|right|down-right|down|down-left|left|up-left|null\",\"duration\":5200,\"nextActionAfter\":1800}。普通聊天优先使用 idle，只有确实适合时才选择动作；不要凭空描述用户没有提供或观察到的事实。",
@@ -857,6 +874,46 @@ fn prompt_for(
         ));
     }
     prompt
+}
+
+fn pet_conversation_prompt(
+    profile: &str,
+    first_id: &str,
+    first_name: &str,
+    first_card: &CharacterCard,
+    first_memories: &[MemoryFact],
+    first_state: &PetLifeState,
+    second_id: &str,
+    second_name: &str,
+    second_card: &CharacterCard,
+    second_memories: &[MemoryFact],
+    second_state: &PetLifeState,
+) -> String {
+    let first_context = prompt_for(
+        first_card,
+        first_id,
+        profile,
+        first_memories,
+        "",
+        first_state,
+        "和另一只桌面宠物交谈",
+    );
+    let second_context = prompt_for(
+        second_card,
+        second_id,
+        profile,
+        second_memories,
+        "",
+        second_state,
+        "和另一只桌面宠物交谈",
+    );
+    format!(
+        "应用约束：你只能生成桌面宠物之间的简短对话和陪伴行为，不执行文件、Shell、系统控制或网络工具。不要把用户没有提供的事实当成事实。\n\n\
+         现在请安排两只宠物进行一次自然、轻松的短对话。它们都是真实存在于桌面上的独立角色，不要让一只替另一只说话，也不要提及模型、提示词或 JSON。每只最多说一句，允许其中一只保持安静；内容应该和它们当前的关系、状态或日常陪伴有关，不要连续打扰用户。\n\n\
+         宠物 A（{first_name}，id: {first_id}）的角色上下文：\n{first_context}\n\n\
+         宠物 B（{second_name}，id: {second_id}）的角色上下文：\n{second_context}\n\n\
+         只返回 JSON，不要 Markdown，格式为：{{\"first\":{{\"say\":\"A 的台词\",\"action\":\"idle|waving|jumping|waiting|review|walk|sleep\",\"mood\":\"心情\",\"look\":\"up|up-right|right|down-right|down|down-left|left|up-left|null\",\"duration\":5200,\"nextActionAfter\":1800}},\"second\":{{\"say\":\"B 的台词\",\"action\":\"idle|waving|jumping|waiting|review|walk|sleep\",\"mood\":\"心情\",\"look\":\"up|up-right|right|down-right|down|down-left|left|up-left|null\",\"duration\":5200,\"nextActionAfter\":1800}}}}。",
+    )
 }
 
 fn tokens(text: &str) -> Vec<String> {
@@ -1277,6 +1334,15 @@ fn choose_memories(app: &tauri::AppHandle, pet_id: &str, query: &str) -> Vec<Mem
     relevant_memories(&load_memories(app, pet_id).unwrap_or_default(), query)
 }
 
+fn choose_relationship_memories(app: &tauri::AppHandle, pet_id: &str) -> Vec<MemoryFact> {
+    let memories = load_memories(app, pet_id)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|memory| memory.kind == "relationship")
+        .collect::<Vec<_>>();
+    relevant_memories(&memories, "宠物之间的互动和共同经历")
+}
+
 fn clean_reply(text: String, max_chars: usize) -> String {
     let text = text.trim().trim_matches('`').trim().to_string();
     if text.len() > max_chars {
@@ -1347,6 +1413,83 @@ fn parse_behavior_response(raw: String, max_chars: usize) -> (String, PetBehavio
         ..PetBehavior::default()
     });
     (say, behavior)
+}
+
+#[derive(Clone, Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct PetConversationResponse {
+    first: PetBehavior,
+    second: PetBehavior,
+}
+
+fn parse_pet_conversation_response(raw: String) -> Option<(PetBehavior, PetBehavior)> {
+    let value = extract_json(&raw)?;
+    let response = serde_json::from_value::<PetConversationResponse>(value).ok()?;
+    let mut first = normalize_behavior(response.first);
+    let mut second = normalize_behavior(response.second);
+    first.say = clean_reply(first.say, 100);
+    second.say = clean_reply(second.say, 100);
+    if first.say.is_empty() && second.say.is_empty() {
+        return None;
+    }
+    Some((first, second))
+}
+
+fn conversation_history(
+    first: &[ChatMessage],
+    second: &[ChatMessage],
+    first_id: &str,
+    first_name: &str,
+    second_id: &str,
+    second_name: &str,
+) -> Vec<ChatMessage> {
+    let mut recent: Vec<(u64, String)> = first
+        .iter()
+        .chain(second.iter())
+        .filter(|message| message.source == "pet-conversation")
+        .map(|message| {
+            let name = message
+                .speaker_name
+                .as_deref()
+                .or_else(|| {
+                    message.speaker_pet_id.as_deref().map(|speaker| {
+                        if speaker == first_id {
+                            first_name
+                        } else if speaker == second_id {
+                            second_name
+                        } else {
+                            speaker
+                        }
+                    })
+                })
+                .unwrap_or(first_name);
+            (message.timestamp, format!("{name}：{}", message.content))
+        })
+        .collect();
+    recent.sort_by_key(|(timestamp, _)| *timestamp);
+    recent.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+    let lines = recent
+        .into_iter()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|(_, line)| line)
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    vec![ChatMessage {
+        id: "__pet_conversation_history__".to_string(),
+        role: "user".to_string(),
+        content: format!("最近的宠物间对话：\n{}", lines.join("\n")),
+        timestamp: now_ms(),
+        source: "pet-conversation-context".to_string(),
+        vision_summary: None,
+        speaker_pet_id: None,
+        speaker_name: None,
+    }]
 }
 
 #[derive(Clone, Debug)]
@@ -1585,6 +1728,8 @@ async fn run_chat_task(
         timestamp: now_ms(),
         source: "chat".to_string(),
         vision_summary: None,
+        speaker_pet_id: None,
+        speaker_name: None,
     };
     append_message(&app, &pet_id, &user_message)?;
     messages.push(user_message);
@@ -1594,7 +1739,7 @@ async fn run_chat_task(
         Vec::new()
     };
     let state = record_pet_interaction_internal(&app, &pet_id, "chat")?;
-    let prompt = prompt_for(
+    let mut prompt = prompt_for(
         &card,
         &pet_id,
         &load_profile(&app),
@@ -1603,6 +1748,7 @@ async fn run_chat_task(
         &state,
         &content,
     );
+    prompt.push_str(&desktop_context_prompt(&app, &config, &pet_id));
     let recent = history_for_prompt(&messages, ai.max_recent_messages);
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -1621,6 +1767,8 @@ async fn run_chat_task(
         timestamp: now_ms(),
         source: "chat".to_string(),
         vision_summary: None,
+        speaker_pet_id: None,
+        speaker_name: None,
     };
     append_message(&app, &pet_id, &assistant)?;
     record_pet_behavior_internal(&app, &pet_id, &behavior)?;
@@ -1776,6 +1924,8 @@ pub(crate) async fn test_ai_provider(
             timestamp: now_ms(),
             source: "test".to_string(),
             vision_summary: None,
+            speaker_pet_id: None,
+            speaker_name: None,
         });
     }
     let result = call_stream(
@@ -2076,6 +2226,215 @@ pub(crate) fn settings_have_chat(settings: &AiSettings) -> bool {
             .is_some_and(|model| !model.model.trim().is_empty())
 }
 
+#[derive(Clone)]
+struct DesktopPetSnapshot {
+    pet_id: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    monitor_key: (i32, i32),
+    work_x: f64,
+    work_y: f64,
+    work_width: f64,
+    work_height: f64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PetMeetupEvent {
+    meetup_id: String,
+    pet_id: String,
+    partner_pet_id: String,
+    target_x: f64,
+    target_y: f64,
+    travel_ms: u64,
+}
+
+fn desktop_pet_snapshots(
+    app: &tauri::AppHandle,
+    config: &super::AppConfig,
+) -> Vec<DesktopPetSnapshot> {
+    super::visible_instances(app, config)
+        .into_iter()
+        .filter_map(|instance| {
+            let position = instance.position?;
+            let label = super::instance_label(&instance.id).ok()?;
+            let window = app.get_webview_window(&label)?;
+            let monitor = window.current_monitor().ok().flatten()?;
+            let scale_factor = monitor.scale_factor().max(1.0);
+            let work_area = monitor.work_area();
+            let settings = super::settings_for_pet(config, &instance.pet_id);
+            Some(DesktopPetSnapshot {
+                pet_id: instance.pet_id,
+                x: position.x,
+                y: position.y,
+                width: super::PET_WIDTH * settings.scale,
+                height: super::PET_HEIGHT * settings.scale,
+                monitor_key: (monitor.position().x, monitor.position().y),
+                work_x: work_area.position.x as f64 / scale_factor,
+                work_y: work_area.position.y as f64 / scale_factor,
+                work_width: work_area.size.width as f64 / scale_factor,
+                work_height: work_area.size.height as f64 / scale_factor,
+            })
+        })
+        .collect()
+}
+
+fn relative_direction(dx: f64, dy: f64) -> &'static str {
+    if dx.abs() < 80.0 && dy.abs() < 80.0 {
+        return "就在旁边";
+    }
+    match (dx.abs() >= 80.0, dy.abs() >= 80.0) {
+        (true, false) if dx < 0.0 => "左边",
+        (true, false) => "右边",
+        (false, true) if dy < 0.0 => "上方",
+        (false, true) => "下方",
+        (true, true) if dx < 0.0 && dy < 0.0 => "左上方",
+        (true, true) if dx >= 0.0 && dy < 0.0 => "右上方",
+        (true, true) if dx < 0.0 => "左下方",
+        _ => "右下方",
+    }
+}
+
+fn desktop_context_prompt(
+    app: &tauri::AppHandle,
+    config: &super::AppConfig,
+    pet_id: &str,
+) -> String {
+    let snapshots = desktop_pet_snapshots(app, config);
+    let Some(current) = snapshots.iter().find(|pet| pet.pet_id == pet_id) else {
+        return "\n当前桌面空间信息暂时不可用，不要臆测屏幕尺寸或其他宠物位置。\n".to_string();
+    };
+    let center_x = current.x + current.width / 2.0;
+    let center_y = current.y + current.height / 2.0;
+    let right_gap = current.work_x + current.work_width - (current.x + current.width);
+    let bottom_gap = current.work_y + current.work_height - (current.y + current.height);
+    let mut others = Vec::new();
+    for other in snapshots.iter().filter(|pet| pet.pet_id != pet_id) {
+        let other_center_x = other.x + other.width / 2.0;
+        let other_center_y = other.y + other.height / 2.0;
+        if other.monitor_key == current.monitor_key {
+            let distance = (other_center_x - center_x).hypot(other_center_y - center_y);
+            others.push(format!(
+                "{}在同一块屏幕的{}，约 {:.0} 个逻辑像素远",
+                super::pet_display_name(app, &other.pet_id),
+                relative_direction(other_center_x - center_x, other_center_y - center_y),
+                distance
+            ));
+        } else {
+            others.push(format!(
+                "{}在另一块显示器上，当前无法直接靠近",
+                super::pet_display_name(app, &other.pet_id)
+            ));
+        }
+    }
+    format!(
+        "\n当前桌面空间（窗口位置，逻辑像素，不是截图）：\n- 当前显示器工作区约 {:.0}×{:.0}\n- 你位于工作区内 ({:.0}, {:.0})，距离右边缘 {:.0}、下边缘 {:.0}\n- 当前可见的其他宠物：{}\n请把这些空间关系当作当前可感知环境；不要编造看不见的窗口内容。\n",
+        current.work_width,
+        current.work_height,
+        current.x - current.work_x,
+        current.y - current.work_y,
+        right_gap.max(0.0),
+        bottom_gap.max(0.0),
+        if others.is_empty() {
+            "没有其他宠物".to_string()
+        } else {
+            others.join("；")
+        }
+    )
+}
+
+fn clamp_meetup_target(snapshot: &DesktopPetSnapshot, x: f64, y: f64) -> (f64, f64) {
+    let max_x = (snapshot.work_x + snapshot.work_width - snapshot.width).max(snapshot.work_x);
+    let max_y = (snapshot.work_y + snapshot.work_height - snapshot.height).max(snapshot.work_y);
+    (
+        x.clamp(snapshot.work_x, max_x),
+        y.clamp(snapshot.work_y, max_y),
+    )
+}
+
+fn meetup_travel_ms(snapshot: &DesktopPetSnapshot, target: (f64, f64), speed: f64) -> u64 {
+    let distance = (target.0 - snapshot.x).hypot(target.1 - snapshot.y);
+    ((distance / speed.max(30.0) * 1_000.0) + 700.0)
+        .round()
+        .clamp(900.0, 15_000.0) as u64
+}
+
+fn plan_pet_meetup(
+    app: &tauri::AppHandle,
+    config: &super::AppConfig,
+    first_id: &str,
+    second_id: &str,
+    meetup_id: &str,
+) -> Option<(PetMeetupEvent, PetMeetupEvent, u64)> {
+    let snapshots = desktop_pet_snapshots(app, config);
+    let first = snapshots.iter().find(|pet| pet.pet_id == first_id)?;
+    let second = snapshots.iter().find(|pet| pet.pet_id == second_id)?;
+    if first.monitor_key != second.monitor_key {
+        return None;
+    }
+    let first_settings = super::settings_for_pet(config, first_id);
+    let second_settings = super::settings_for_pet(config, second_id);
+    if !first_settings.wander_enabled || !second_settings.wander_enabled {
+        return None;
+    }
+
+    let first_center = (first.x + first.width / 2.0, first.y + first.height / 2.0);
+    let second_center = (
+        second.x + second.width / 2.0,
+        second.y + second.height / 2.0,
+    );
+    let group_center_x = (first_center.0 + second_center.0) / 2.0;
+    let group_center_y = (first_center.1 + second_center.1) / 2.0;
+    let gap = 18.0;
+    let first_is_left = first_center.0 <= second_center.0;
+    let left_width = if first_is_left {
+        first.width
+    } else {
+        second.width
+    };
+    let right_width = if first_is_left {
+        second.width
+    } else {
+        first.width
+    };
+    let left_x = group_center_x - (left_width + right_width + gap) / 2.0;
+    let right_x = left_x + left_width + gap;
+    let first_target = clamp_meetup_target(
+        first,
+        if first_is_left { left_x } else { right_x },
+        group_center_y - first.height / 2.0,
+    );
+    let second_target = clamp_meetup_target(
+        second,
+        if first_is_left { right_x } else { left_x },
+        group_center_y - second.height / 2.0,
+    );
+    let travel_ms = meetup_travel_ms(first, first_target, first_settings.speed).max(
+        meetup_travel_ms(second, second_target, second_settings.speed),
+    );
+    Some((
+        PetMeetupEvent {
+            meetup_id: meetup_id.to_string(),
+            pet_id: first_id.to_string(),
+            partner_pet_id: second_id.to_string(),
+            target_x: first_target.0,
+            target_y: first_target.1,
+            travel_ms,
+        },
+        PetMeetupEvent {
+            meetup_id: meetup_id.to_string(),
+            pet_id: second_id.to_string(),
+            partner_pet_id: first_id.to_string(),
+            target_x: second_target.0,
+            target_y: second_target.1,
+            travel_ms,
+        },
+        travel_ms,
+    ))
+}
+
 async fn run_heartbeat(app: tauri::AppHandle, pet_id: String) -> Result<(), String> {
     let config = config_snapshot(&app)?;
     let ai = config.ai.clone();
@@ -2116,6 +2475,7 @@ async fn run_heartbeat(app: tauri::AppHandle, pet_id: String) -> Result<(), Stri
         &state,
         "heartbeat",
     );
+    prompt.push_str(&desktop_context_prompt(&app, &config, &pet_id));
     prompt.push_str("\n\n这是一次安静的 heartbeat。只有在确实有自然、和当前关系有关的话可说时才回复；否则让 say 为空。回复最多 80 个中文字符，不要提及你是模型。");
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
@@ -2179,6 +2539,8 @@ async fn run_heartbeat(app: tauri::AppHandle, pet_id: String) -> Result<(), Stri
                     timestamp: now_ms(),
                     source: "vision".to_string(),
                     vision_summary: None,
+                    speaker_pet_id: None,
+                    speaker_name: None,
                 };
                 if let Ok(summary) = call_stream(&client, &vision_endpoint, "你是一个严格的桌面视觉观察器。只比较两次截图中看得见的非敏感事实，不进行推断，不输出角色台词。", &[vision_message], Some(&image), false, |_| {}).await {
                     let (meaningful_change, summary) = parse_visual_observation(summary, true);
@@ -2218,6 +2580,8 @@ async fn run_heartbeat(app: tauri::AppHandle, pet_id: String) -> Result<(), Stri
         timestamp: now_ms(),
         source: "heartbeat".to_string(),
         vision_summary,
+        speaker_pet_id: None,
+        speaker_name: None,
     };
     append_message(&app, &pet_id, &message)?;
     record_pet_behavior_internal(&app, &pet_id, &behavior)?;
@@ -2233,19 +2597,284 @@ async fn run_heartbeat(app: tauri::AppHandle, pet_id: String) -> Result<(), Stri
     Ok(())
 }
 
+fn pet_conversation_message(
+    request_id: &str,
+    pet_id: &str,
+    pet_name: &str,
+    behavior: &PetBehavior,
+    timestamp: u64,
+) -> ChatMessage {
+    ChatMessage {
+        id: format!("pet-conversation-{request_id}-{pet_id}"),
+        role: "assistant".to_string(),
+        content: behavior.say.clone(),
+        timestamp,
+        source: "pet-conversation".to_string(),
+        vision_summary: None,
+        speaker_pet_id: Some(pet_id.to_string()),
+        speaker_name: Some(pet_name.to_string()),
+    }
+}
+
+fn relationship_memory_content(
+    pet_id: &str,
+    first_id: &str,
+    first_name: &str,
+    first_say: &str,
+    second_id: &str,
+    second_name: &str,
+    second_say: &str,
+) -> String {
+    let (self_name, other_name) = if pet_id == first_id {
+        (first_name, second_name)
+    } else if pet_id == second_id {
+        (second_name, first_name)
+    } else {
+        (pet_id, second_name)
+    };
+    format!(
+        "我和{other_name}的一次互动：{self_name}：“{}”；{other_name}：“{}”",
+        if pet_id == first_id {
+            first_say
+        } else {
+            second_say
+        },
+        if pet_id == first_id {
+            second_say
+        } else {
+            first_say
+        },
+    )
+}
+
+fn store_pet_relationship_memory(
+    app: &tauri::AppHandle,
+    pet_id: &str,
+    first_id: &str,
+    first_name: &str,
+    first_say: &str,
+    second_id: &str,
+    second_name: &str,
+    second_say: &str,
+    request_id: &str,
+    timestamp: u64,
+) -> Result<(), String> {
+    let content = relationship_memory_content(
+        pet_id,
+        first_id,
+        first_name,
+        first_say,
+        second_id,
+        second_name,
+        second_say,
+    );
+    store_memory(
+        app,
+        pet_id,
+        &MemoryFact {
+            id: format!("pet-relationship-{request_id}-{pet_id}"),
+            content,
+            kind: "relationship".to_string(),
+            scope: "pet".to_string(),
+            importance: 1.0,
+            confidence: 1.0,
+            created_at: timestamp,
+            updated_at: timestamp,
+            status: "active".to_string(),
+            expires_at: None,
+        },
+    )
+}
+
+async fn run_pet_conversation(
+    app: tauri::AppHandle,
+    first_id: String,
+    second_id: String,
+    request_id: String,
+) -> Result<(), String> {
+    let config = config_snapshot(&app)?;
+    let ai = config.ai.clone();
+    if !settings_have_chat(&ai) || !ai.pet_conversation_enabled {
+        return Ok(());
+    }
+    let first_settings = super::settings_for_pet(&config, &first_id);
+    let second_settings = super::settings_for_pet(&config, &second_id);
+    if first_settings.paused
+        || first_settings.quiet_mode
+        || second_settings.paused
+        || second_settings.quiet_mode
+    {
+        return Ok(());
+    }
+    let chat_window_open = app.webview_windows().iter().any(|(label, window)| {
+        label.starts_with("pet-chat-") && window.is_visible().unwrap_or(false)
+    });
+    if chat_window_open {
+        return Ok(());
+    }
+
+    let endpoint = ai
+        .chat_model
+        .clone()
+        .ok_or_else(|| "尚未配置聊天模型".to_string())?;
+    let first_card = card_for_pet(&app, &first_id)?;
+    let second_card = card_for_pet(&app, &second_id)?;
+    let first_name = super::pet_display_name(&app, &first_id);
+    let second_name = super::pet_display_name(&app, &second_id);
+    let first_messages = load_messages(&app, &first_id)?;
+    let second_messages = load_messages(&app, &second_id)?;
+    let first_memories = if ai.memory_enabled {
+        choose_memories(&app, &first_id, "和另一只宠物的共同经历")
+    } else {
+        choose_relationship_memories(&app, &first_id)
+    };
+    let second_memories = if ai.memory_enabled {
+        choose_memories(&app, &second_id, "和另一只宠物的共同经历")
+    } else {
+        choose_relationship_memories(&app, &second_id)
+    };
+    let first_state = pet_life_state(&app, &first_id)?;
+    let second_state = pet_life_state(&app, &second_id)?;
+    let profile = load_profile(&app);
+    let mut prompt = pet_conversation_prompt(
+        &profile,
+        &first_id,
+        &first_name,
+        &first_card,
+        &first_memories,
+        &first_state,
+        &second_id,
+        &second_name,
+        &second_card,
+        &second_memories,
+        &second_state,
+    );
+    prompt.push_str(&desktop_context_prompt(&app, &config, &first_id));
+    prompt.push_str(&desktop_context_prompt(&app, &config, &second_id));
+    let history = conversation_history(
+        &first_messages,
+        &second_messages,
+        &first_id,
+        &first_name,
+        &second_id,
+        &second_name,
+    );
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let raw = call_stream(&client, &endpoint, &prompt, &history, None, false, |_| {}).await?;
+    let Some((first_behavior, second_behavior)) = parse_pet_conversation_response(raw) else {
+        return Ok(());
+    };
+    let exchange_timestamp = now_ms();
+    let first_message = (!first_behavior.say.is_empty()).then(|| {
+        pet_conversation_message(
+            &request_id,
+            &first_id,
+            &first_name,
+            &first_behavior,
+            exchange_timestamp,
+        )
+    });
+    let second_message = (!second_behavior.say.is_empty()).then(|| {
+        pet_conversation_message(
+            &request_id,
+            &second_id,
+            &second_name,
+            &second_behavior,
+            exchange_timestamp,
+        )
+    });
+    if first_message.is_none() && second_message.is_none() {
+        return Ok(());
+    }
+
+    // Store both sides in both histories so either pet can remember their
+    // shared exchange, while speaker metadata keeps the chat window readable.
+    for pet_id in [&first_id, &second_id] {
+        if let Some(message) = &first_message {
+            append_message(&app, pet_id, message)?;
+        }
+        if let Some(message) = &second_message {
+            append_message(&app, pet_id, message)?;
+        }
+    }
+
+    // Relationship memory is deliberately independent from user-memory
+    // extraction. Both pets should retain the shared exchange, even when the
+    // user has disabled AI memory for conversations with them.
+    let first_say = first_message
+        .as_ref()
+        .map(|message| message.content.as_str())
+        .unwrap_or("");
+    let second_say = second_message
+        .as_ref()
+        .map(|message| message.content.as_str())
+        .unwrap_or("");
+    for pet_id in [&first_id, &second_id] {
+        if let Err(error) = store_pet_relationship_memory(
+            &app,
+            pet_id,
+            &first_id,
+            &first_name,
+            first_say,
+            &second_id,
+            &second_name,
+            second_say,
+            &request_id,
+            exchange_timestamp,
+        ) {
+            eprintln!("pet relationship memory save failed: {error}");
+        }
+    }
+
+    let _ = record_pet_interaction_internal(&app, &first_id, "pet-conversation");
+    let _ = record_pet_interaction_internal(&app, &second_id, "pet-conversation");
+    if let Some(message) = first_message {
+        record_pet_behavior_internal(&app, &first_id, &first_behavior)?;
+        let _ = app.emit(
+            "chat://complete",
+            ChatCompleteEvent {
+                request_id: format!("{request_id}-first"),
+                pet_id: first_id.clone(),
+                message,
+                behavior: Some(first_behavior),
+            },
+        );
+    }
+    if let Some(message) = second_message {
+        record_pet_behavior_internal(&app, &second_id, &second_behavior)?;
+        let _ = app.emit(
+            "chat://complete",
+            ChatCompleteEvent {
+                request_id: format!("{request_id}-second"),
+                pet_id: second_id,
+                message,
+                behavior: Some(second_behavior),
+            },
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn start_heartbeat_scheduler(app: &tauri::AppHandle) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let mut next_heartbeat: HashMap<String, u64> = HashMap::new();
+        let mut next_pet_conversation: HashMap<String, u64> = HashMap::new();
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
             let Ok(config) = config_snapshot(&app) else {
                 continue;
             };
-            if !settings_have_chat(&config.ai) || !config.ai.heartbeat_enabled {
+            if !settings_have_chat(&config.ai)
+                || (!config.ai.heartbeat_enabled && !config.ai.pet_conversation_enabled)
+            {
                 continue;
             }
-            let candidates: Vec<String> = super::visible_instances(&app, &config)
+            let mut candidates: Vec<String> = super::visible_instances(&app, &config)
                 .into_iter()
                 .filter(|instance| {
                     let settings = super::settings_for_pet(&config, &instance.pet_id);
@@ -2253,15 +2882,125 @@ pub(crate) fn start_heartbeat_scheduler(app: &tauri::AppHandle) {
                 })
                 .map(|instance| instance.pet_id)
                 .collect();
+            candidates.sort();
+            candidates.dedup();
             let candidate_ids: HashSet<&str> = candidates.iter().map(String::as_str).collect();
             next_heartbeat.retain(|pet_id, _| candidate_ids.contains(pet_id.as_str()));
             let now = now_ms();
-            for pet_id in &candidates {
-                next_heartbeat.entry(pet_id.clone()).or_insert_with(|| {
-                    now.saturating_add(random_heartbeat_delay(&config.ai).as_millis() as u64)
-                });
+            if config.ai.heartbeat_enabled {
+                for pet_id in &candidates {
+                    next_heartbeat.entry(pet_id.clone()).or_insert_with(|| {
+                        now.saturating_add(random_heartbeat_delay(&config.ai).as_millis() as u64)
+                    });
+                }
+            } else {
+                next_heartbeat.clear();
             }
-            if now.saturating_sub(LAST_HEARTBEAT_MS.load(Ordering::Relaxed)) < 10 * 60 * 1000 {
+
+            let mut conversation_pairs = Vec::new();
+            if config.ai.pet_conversation_enabled {
+                for (index, first_id) in candidates.iter().enumerate() {
+                    for second_id in candidates.iter().skip(index + 1) {
+                        let pair_key = format!("{first_id}\u{1f}{second_id}");
+                        next_pet_conversation
+                            .entry(pair_key.clone())
+                            .or_insert_with(|| {
+                                now.saturating_add(
+                                    random_heartbeat_delay(&config.ai).as_millis() as u64
+                                )
+                            });
+                        conversation_pairs.push((pair_key, first_id.clone(), second_id.clone()));
+                    }
+                }
+            } else {
+                next_pet_conversation.clear();
+            }
+            let candidate_pair_keys: HashSet<&str> = conversation_pairs
+                .iter()
+                .map(|(pair_key, _, _)| pair_key.as_str())
+                .collect();
+            next_pet_conversation
+                .retain(|pair_key, _| candidate_pair_keys.contains(pair_key.as_str()));
+
+            let last_companion_event = LAST_HEARTBEAT_MS
+                .load(Ordering::Relaxed)
+                .max(LAST_PET_CONVERSATION_MS.load(Ordering::Relaxed));
+            let companion_cooldown_over =
+                now.saturating_sub(last_companion_event) >= 10 * 60 * 1000;
+            let no_active_task = app
+                .state::<AppState>()
+                .ai
+                .active_pets
+                .lock()
+                .map(|pets| pets.is_empty())
+                .unwrap_or(false);
+
+            if config.ai.pet_conversation_enabled && companion_cooldown_over && no_active_task {
+                if let Some((pair_key, first_id, second_id)) = conversation_pairs
+                    .iter()
+                    .find(|(pair_key, _, _)| {
+                        next_pet_conversation
+                            .get(pair_key)
+                            .is_some_and(|due| *due <= now)
+                    })
+                    .cloned()
+                {
+                    let request_id = format!("pet-conversation-{now}");
+                    next_pet_conversation.insert(
+                        pair_key,
+                        now.saturating_add(random_heartbeat_delay(&config.ai).as_millis() as u64),
+                    );
+                    let reserved = app
+                        .state::<AppState>()
+                        .ai
+                        .active_pets
+                        .lock()
+                        .map(|mut pets| {
+                            if pets.contains_key(&first_id) || pets.contains_key(&second_id) {
+                                return false;
+                            }
+                            pets.insert(first_id.clone(), request_id.clone());
+                            pets.insert(second_id.clone(), request_id.clone());
+                            true
+                        })
+                        .unwrap_or(false);
+                    if reserved {
+                        LAST_PET_CONVERSATION_MS.store(now, Ordering::Relaxed);
+                        if let Some((first_meetup, second_meetup, travel_ms)) =
+                            plan_pet_meetup(&app, &config, &first_id, &second_id, &request_id)
+                        {
+                            let _ = app.emit("pet://meetup", first_meetup);
+                            let _ = app.emit("pet://meetup", second_meetup);
+                            // Give both windows time to arrive before asking the
+                            // model to make the pets whisper to one another.
+                            tokio::time::sleep(Duration::from_millis(travel_ms + 450)).await;
+                        }
+                        if let Err(error) = run_pet_conversation(
+                            app.clone(),
+                            first_id.clone(),
+                            second_id.clone(),
+                            request_id.clone(),
+                        )
+                        .await
+                        {
+                            eprintln!("pet conversation failed: {error}");
+                        }
+                        if let Ok(mut pets) = app.state::<AppState>().ai.active_pets.lock() {
+                            for pet_id in [&first_id, &second_id] {
+                                if pets
+                                    .get(pet_id)
+                                    .is_some_and(|active_id| active_id == &request_id)
+                                {
+                                    pets.remove(pet_id);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if !config.ai.heartbeat_enabled || !companion_cooldown_over {
                 continue;
             }
             let Some(pet_id) = candidates
@@ -2276,7 +3015,7 @@ pub(crate) fn start_heartbeat_scheduler(app: &tauri::AppHandle) {
                 .active_pets
                 .lock()
                 .map(|pets| !pets.is_empty())
-                .unwrap_or(true)
+                .unwrap_or(false)
             {
                 continue;
             }
@@ -2372,6 +3111,52 @@ mod tests {
     }
 
     #[test]
+    fn pet_conversation_response_is_bounded_and_keeps_both_speakers() {
+        let long_line = "喵".repeat(140);
+        let raw = format!(
+            r#"{{"first":{{"say":"{long_line}","action":"jumping"}},"second":{{"say":"记住这次一起晒太阳。","mood":"开心"}}}}"#
+        );
+        let (first, second) = parse_pet_conversation_response(raw).expect("valid exchange");
+        assert_eq!(first.say.chars().count(), 100);
+        assert_eq!(first.action, "jumping");
+        assert_eq!(second.say, "记住这次一起晒太阳。");
+    }
+
+    #[test]
+    fn relationship_memory_is_written_from_each_pet_view() {
+        let first_view = relationship_memory_content(
+            "saki",
+            "saki",
+            "小祥",
+            "今天一起晒太阳吧。",
+            "anoninu",
+            "阿农",
+            "好呀，我记住了。",
+        );
+        let second_view = relationship_memory_content(
+            "anoninu",
+            "saki",
+            "小祥",
+            "今天一起晒太阳吧。",
+            "anoninu",
+            "阿农",
+            "好呀，我记住了。",
+        );
+        assert!(first_view.contains("我和阿农的一次互动"));
+        assert!(first_view.contains("小祥：“今天一起晒太阳吧。”"));
+        assert!(second_view.contains("我和小祥的一次互动"));
+        assert!(second_view.contains("阿农：“好呀，我记住了。”"));
+    }
+
+    #[test]
+    fn desktop_relationship_direction_is_stable() {
+        assert_eq!(relative_direction(-240.0, 0.0), "左边");
+        assert_eq!(relative_direction(0.0, 180.0), "下方");
+        assert_eq!(relative_direction(20.0, 20.0), "就在旁边");
+        assert_eq!(relative_direction(-160.0, -160.0), "左上方");
+    }
+
+    #[test]
     fn pet_life_state_decays_attention_and_becomes_lonely() {
         let mut state = PetLifeState::default();
         state.attention = 35;
@@ -2443,6 +3228,8 @@ mod tests {
             timestamp: now_ms(),
             source: "chat".to_string(),
             vision_summary: None,
+            speaker_pet_id: None,
+            speaker_name: None,
         }];
         let responses = ModelEndpointConfig {
             model: "gpt-test".to_string(),
@@ -2490,6 +3277,8 @@ mod tests {
                 timestamp: now_ms(),
                 source: "vision".to_string(),
                 vision_summary: None,
+                speaker_pet_id: None,
+                speaker_name: None,
             }],
             Some("data:image/jpeg;base64,abc"),
             false,

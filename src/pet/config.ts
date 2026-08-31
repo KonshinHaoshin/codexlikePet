@@ -32,6 +32,7 @@ export interface PetInstanceInfo {
   petId: string;
   visible: boolean;
   isMain: boolean;
+  position?: { x: number; y: number } | null;
 }
 
 export interface InstalledPetInfo {
@@ -91,6 +92,7 @@ export interface AiSettings {
   heartbeatMaxMinutes: number;
   heartbeatVisionChance: number;
   desktopVisionEnabled: boolean;
+  petConversationEnabled: boolean;
 }
 
 export interface PetLifeState {
@@ -104,6 +106,7 @@ export interface PetLifeState {
   knownSince: number;
   interactionCount: number;
   chatCount: number;
+  petInteractionCount: number;
   nextActionAt: number;
 }
 
@@ -136,5 +139,7 @@ export interface ChatMessage {
   timestamp: number;
   source: string;
   visionSummary?: string | null;
+  speakerPetId?: string | null;
+  speakerName?: string | null;
   behavior?: PetBehavior | null;
 }

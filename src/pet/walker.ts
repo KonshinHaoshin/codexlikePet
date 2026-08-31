@@ -14,6 +14,11 @@ interface WalkBounds {
   maxY: number;
 }
 
+interface WalkTarget {
+  x: number;
+  y: number;
+}
+
 /** Moves the pet occasionally while leaving long, quiet idle periods. */
 export class PetWalker {
   private readonly window = getCurrentWindow();
@@ -23,6 +28,7 @@ export class PetWalker {
   private speed = 95;
   private enabled = true;
   private quietMode = false;
+  private forcedTarget: WalkTarget | null = null;
 
   constructor(
     private readonly onChange: (walking: boolean, direction: MoveDirection | null) => void,
@@ -52,8 +58,25 @@ export class PetWalker {
     void this.walk();
   }
 
+  /** Walk to a target chosen by a social desktop event. */
+  walkTo(x: number, y: number): void {
+    if (!this.enabled || this.quietMode || dragState.current) return;
+    this.walkToken += 1;
+    if (this.timer !== null) {
+      window.clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.forcedTarget = { x, y };
+    if (this.walking) {
+      this.walking = false;
+      this.onChange(false, null);
+    }
+    void this.walk();
+  }
+
   stop(): void {
     this.walkToken += 1;
+    this.forcedTarget = null;
     if (this.timer !== null) {
       window.clearTimeout(this.timer);
       this.timer = null;
@@ -106,15 +129,24 @@ export class PetWalker {
       };
       const currentX = Math.min(bounds.maxX, Math.max(bounds.minX, currentPosition.x));
       const currentY = Math.min(bounds.maxY, Math.max(bounds.minY, currentPosition.y));
-      const movementRoll = Math.random();
-      const diagonalUp = movementRoll < 0.22;
-      const vertical = !diagonalUp && movementRoll < 0.40;
-      const targetX = vertical ? currentX : this.pickTarget(currentX, bounds.minX, bounds.maxX);
-      const targetY = diagonalUp
-        ? this.pickUpperTarget(currentY, bounds.minY)
-        : vertical
-          ? this.pickTarget(currentY, bounds.minY, bounds.maxY)
-          : currentY;
+      const forcedTarget = this.forcedTarget;
+      this.forcedTarget = null;
+      let targetX: number;
+      let targetY: number;
+      if (forcedTarget) {
+        targetX = Math.min(bounds.maxX, Math.max(bounds.minX, forcedTarget.x));
+        targetY = Math.min(bounds.maxY, Math.max(bounds.minY, forcedTarget.y));
+      } else {
+        const movementRoll = Math.random();
+        const diagonalUp = movementRoll < 0.22;
+        const vertical = !diagonalUp && movementRoll < 0.40;
+        targetX = vertical ? currentX : this.pickTarget(currentX, bounds.minX, bounds.maxX);
+        targetY = diagonalUp
+          ? this.pickUpperTarget(currentY, bounds.minY)
+          : vertical
+            ? this.pickTarget(currentY, bounds.minY, bounds.maxY)
+            : currentY;
+      }
       const distance = Math.hypot(targetX - currentX, targetY - currentY);
       if (distance < 1) {
         this.schedule();

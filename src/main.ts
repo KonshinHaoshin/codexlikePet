@@ -23,6 +23,15 @@ type DialogueTrigger = Exclude<keyof PetDialogue, "version">;
 const IDLE_SPEECH_DELAY_MS = 90_000;
 const PET_BUBBLE_MAX_CHARS = 100;
 
+interface PetMeetupEvent {
+  meetupId: string;
+  petId: string;
+  partnerPetId: string;
+  targetX: number;
+  targetY: number;
+  travelMs: number;
+}
+
 async function boot(): Promise<void> {
   const window = getCurrentWindow();
   const runtime = await invoke<RuntimeConfig>("get_runtime_config", { windowLabel: window.label });
@@ -328,6 +337,10 @@ async function boot(): Promise<void> {
       void openPetManager();
     }
   });
+  await listen<PetMeetupEvent>("pet://meetup", ({ payload }) => {
+    if (payload.petId !== runtime.petId) return;
+    walker.walkTo(payload.targetX, payload.targetY);
+  });
   await listen<{ requestId: string; petId: string; delta: string }>("chat://delta", ({ payload }) => {
     if (payload.petId !== runtime.petId) return;
     if (chatRequestId !== null && payload.requestId !== chatRequestId) return;
@@ -344,6 +357,10 @@ async function boot(): Promise<void> {
     if (payload.petId !== runtime.petId) return;
     applyPetBehavior(payload.behavior);
     if (payload.message.source === "heartbeat") {
+      showSpeech(payload.message.content, payload.behavior?.duration ?? 5_200);
+      return;
+    }
+    if (payload.message.source === "pet-conversation") {
       showSpeech(payload.message.content, payload.behavior?.duration ?? 5_200);
       return;
     }

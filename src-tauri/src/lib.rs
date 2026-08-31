@@ -673,6 +673,7 @@ struct PetInstanceInfo {
     pet_id: String,
     visible: bool,
     is_main: bool,
+    position: Option<PetPosition>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1326,6 +1327,16 @@ fn visible_instances(app: &tauri::AppHandle, config: &AppConfig) -> Vec<PetInsta
             pet_id: instance.pet_id.clone(),
             visible: true,
             is_main: instance.id == "main",
+            position: app
+                .get_webview_window(&instance_label(&instance.id).unwrap_or_default())
+                .and_then(|window| {
+                    let position = window.outer_position().ok()?;
+                    let scale_factor = window.scale_factor().ok()?.max(1.0);
+                    Some(PetPosition {
+                        x: position.x as f64 / scale_factor,
+                        y: position.y as f64 / scale_factor,
+                    })
+                }),
         })
         .collect()
 }
@@ -1350,6 +1361,7 @@ fn all_instance_info(config: &AppConfig) -> Vec<PetInstanceInfo> {
             pet_id: instance.pet_id.clone(),
             visible: instance.visible,
             is_main: instance.id == "main",
+            position: None,
         })
         .collect()
 }
@@ -1621,6 +1633,7 @@ fn add_pet_instance_internal(
         pet_id: instance.pet_id,
         visible: instance.visible,
         is_main: false,
+        position: None,
     })
 }
 

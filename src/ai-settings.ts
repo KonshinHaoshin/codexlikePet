@@ -33,6 +33,7 @@ const visionKey = document.querySelector<HTMLInputElement>("#vision-key")!;
 const clearVisionKey = document.querySelector<HTMLButtonElement>("#clear-vision-key")!;
 const memoryEnabled = document.querySelector<HTMLInputElement>("#memory-enabled")!;
 const heartbeatEnabled = document.querySelector<HTMLInputElement>("#heartbeat-enabled")!;
+const petConversationEnabled = document.querySelector<HTMLInputElement>("#pet-conversation-enabled")!;
 const desktopVisionEnabled = document.querySelector<HTMLInputElement>("#desktop-vision-enabled")!;
 const maxRecentMessages = document.querySelector<HTMLInputElement>("#max-recent-messages")!;
 const heartbeatMinutes = document.querySelector<HTMLInputElement>("#heartbeat-minutes")!;
@@ -89,6 +90,7 @@ function populateAiSettings(settings: AiSettings): void {
   visionBaseUrl.value = vision?.baseUrl ?? "";
   memoryEnabled.checked = settings.memoryEnabled;
   heartbeatEnabled.checked = settings.heartbeatEnabled;
+  petConversationEnabled.checked = settings.petConversationEnabled;
   desktopVisionEnabled.checked = settings.desktopVisionEnabled;
   maxRecentMessages.value = String(settings.maxRecentMessages);
   heartbeatMinutes.value = String(settings.heartbeatMinMinutes);
@@ -132,6 +134,7 @@ async function saveAiSettings(): Promise<void> {
     heartbeatMaxMinutes: 60,
     heartbeatVisionChance: 0.3,
     desktopVisionEnabled: false,
+    petConversationEnabled: true,
   } satisfies AiSettings;
   const chatCredentialRef = previous.chatModel?.credentialRef ?? "chat-api-key";
   const chat = endpointFromForm(chatProvider, chatBaseUrl, chatModel, chatCredentialRef);
@@ -169,6 +172,7 @@ async function saveAiSettings(): Promise<void> {
       heartbeatMaxMinutes: numericValue(heartbeatMaxMinutes, previous.heartbeatMaxMinutes),
       heartbeatVisionChance: numericValue(heartbeatVisionChance, previous.heartbeatVisionChance),
       desktopVisionEnabled: desktopVisionEnabled.checked,
+      petConversationEnabled: petConversationEnabled.checked,
     },
   });
   populateAiSettings(saved);

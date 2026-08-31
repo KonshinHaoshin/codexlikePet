@@ -88,11 +88,12 @@ jobs:
           tagName: __VERSION__
           releaseName: SakiPet v__VERSION__
           releaseBody: |
-            ## SakiPet 0.1.0
+            ## SakiPet
 
-            一个可爱的跨平台桌面宠物，支持多种宠物资源、独立设置、互动台词、拖拽移动和全屏覆盖显示。
+            一个可爱的跨平台桌面宠物，支持多种宠物资源、独立设置、互动台词、拖拽移动、
+            宠物间对话、关系记忆和全屏覆盖显示。
 
-            本版本构建了 macOS Apple Silicon/Intel、Windows 和 Linux 安装包。
+            本版本构建 macOS Apple Silicon/Intel、Windows 和 Linux 安装包。
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true

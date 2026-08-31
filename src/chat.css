@@ -31,6 +31,8 @@ button:disabled { opacity: .55; cursor: wait; }
 .message.assistant::after { position: absolute; bottom: 5px; left: -8px; border-top: 7px solid transparent; border-right: 10px solid #fff; border-bottom: 7px solid transparent; content: ""; }
 .message.heartbeat { border-color: #f7c4d8; background: #fff8fc; }
 .message.heartbeat::after { border-right-color: #fff8fc; }
+.message.pet-conversation { border-color: #f3c8dc; background: #fff4fa; }
+.message.pet-conversation::after { border-right-color: #fff4fa; }
 .status { min-height: 20px; margin: 0 0 6px; color: #e36f98; font-size: 12px; }
 .composer { position: relative; margin: 0; padding: 9px 10px 8px; border: 1px solid #c9e6eb; border-radius: 18px; background: #fff; box-shadow: 0 8px 22px #7cbfc51f; }
 .composer::before { position: absolute; left: 22px; bottom: -8px; border-top: 10px solid #fff; border-right: 10px solid transparent; content: ""; filter: drop-shadow(0 1px 0 #c9e6eb); }

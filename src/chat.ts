@@ -24,8 +24,14 @@ function setStatus(text: string): void { status.textContent = text; }
 
 function createMessageElement(message: ChatMessage): HTMLElement {
   const element = document.createElement("div");
-  element.className = `message ${message.role} ${message.source === "heartbeat" ? "heartbeat" : ""}`;
-  element.textContent = message.content;
+  const passiveClass = message.source === "heartbeat" || message.source === "pet-conversation"
+    ? message.source
+    : "";
+  element.className = `message ${message.role} ${passiveClass}`;
+  const speaker = message.speakerName && message.speakerPetId !== petId
+    ? `${message.speakerName}：`
+    : "";
+  element.textContent = `${speaker}${message.content}`;
   return element;
 }
 
@@ -127,8 +133,9 @@ function applyDelta(payload: PendingEvent["payload"] & { delta: string }): void 
 }
 
 function applyComplete(payload: Extract<PendingEvent, { type: "complete" }>["payload"]): void {
-  if (payload.petId !== petId || payload.requestId !== activeRequest) {
-    if (payload.petId === petId && payload.message.source === "heartbeat") addMessage(payload.message);
+  const passive = payload.message.source === "heartbeat" || payload.message.source === "pet-conversation";
+  if (payload.petId !== petId || (payload.requestId !== activeRequest && !passive)) {
+    if (payload.petId === petId && passive) addMessage(payload.message);
     return;
   }
   if (streamingMessage) {

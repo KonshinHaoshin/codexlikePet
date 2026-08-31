@@ -3,6 +3,7 @@ import { confirmDialog } from "./ui/confirm";
 import { CELL_HEIGHT, CELL_WIDTH, type PetManifest } from "./pet/atlas";
 import type {
   InstalledPetInfo,
+  PetLifeState,
   PetInstanceInfo,
   PetSettings,
 } from "./pet/config";
@@ -15,6 +16,7 @@ interface LoadedPet {
   info: InstalledPetInfo;
   manifest: PetManifest | null;
   preview: HTMLCanvasElement | null;
+  life: PetLifeState | null;
   error?: string;
 }
 
@@ -104,6 +106,30 @@ function createPreview(pet: LoadedPet): HTMLElement {
     wrapper.textContent = "暂无预览";
     wrapper.classList.add("pet-preview-fallback");
   }
+  return wrapper;
+}
+
+function createBondSummary(pet: LoadedPet): HTMLElement {
+  const wrapper = document.createElement("div");
+  wrapper.className = "bond-summary";
+  const header = document.createElement("div");
+  header.className = "bond-summary-header";
+  const label = document.createElement("span");
+  label.textContent = "好感度";
+  const value = document.createElement("strong");
+  const bond = pet.life?.bond ?? 0;
+  value.textContent = `${bond} / 100`;
+  header.append(label, value);
+  const track = document.createElement("div");
+  track.className = "bond-track";
+  const fill = document.createElement("span");
+  fill.style.width = `${bond}%`;
+  track.append(fill);
+  const detail = document.createElement("small");
+  detail.textContent = pet.life
+    ? `${pet.life.mood} · 互动 ${pet.life.interactionCount} 次 · 和其他宠物 ${pet.life.petInteractionCount} 次`
+    : "正在读取宠物状态…";
+  wrapper.append(header, track, detail);
   return wrapper;
 }
 
@@ -404,6 +430,7 @@ function render(): void {
     description.className = "pet-description";
     description.textContent = pet.manifest?.description ?? pet.error ?? "资源信息不可用";
     content.append(description);
+    content.append(createBondSummary(pet));
 
     const actions = document.createElement("div");
     actions.className = "pet-actions";
@@ -507,11 +534,14 @@ async function loadAll(): Promise<void> {
   instances = nextInstances;
   pets = await Promise.all(catalog.map(async (info): Promise<LoadedPet> => {
     try {
-      const manifest = await loadManifest(info);
+      const [manifest, life] = await Promise.all([
+        loadManifest(info),
+        invoke<PetLifeState>("get_pet_state", { petId: info.id }),
+      ]);
       const preview = await loadPreview(info, manifest);
-      return { info, manifest, preview };
+      return { info, manifest, preview, life };
     } catch (error) {
-      return { info, manifest: null, preview: null, error: errorMessage(error) };
+      return { info, manifest: null, preview: null, life: null, error: errorMessage(error) };
     }
   }));
   render();

@@ -18,7 +18,7 @@ use tauri::{Emitter, Manager};
 
 use super::{config_snapshot, AppState, CharacterCard};
 
-const SERVICE_NAME: &str = "com.ifan.sakipet";
+const SERVICE_NAME: &str = "com.sakipet.desktop";
 const AI_DIRECTORY: &str = "ai";
 const MAX_MESSAGE_CHARS: usize = 4_000;
 const MAX_HISTORY_MESSAGES: usize = 200;

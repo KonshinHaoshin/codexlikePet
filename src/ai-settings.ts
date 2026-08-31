@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { waitForAppReady } from "./appReady";
 import { confirmDialog, promptDialog } from "./ui/confirm";
 import type {
   AiSettings,
@@ -409,4 +410,6 @@ memoryForm.addEventListener("submit", (event) => {
   void addManualMemory().catch((error) => setStatus(errorMessage(error), "error"));
 });
 
-void load();
+void waitForAppReady()
+  .then(() => load())
+  .catch((error) => setStatus(errorMessage(error), "error"));

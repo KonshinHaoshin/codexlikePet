@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "SakiPet",
-  "version": "0.1.1",
-  "identifier": "com.ifan.codexlike-pet",
+  "version": "0.1.2",
+  "identifier": "com.sakipet.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",

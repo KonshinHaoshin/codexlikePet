@@ -9,6 +9,7 @@ import { watchCursorDirection } from "./pet/cursorWatcher";
 import { PetStateMachine, type PetAction } from "./pet/stateMachine";
 import { attachDrag, attachGestures, dragState, type DragDirection, type Gesture } from "./pet/window";
 import { PetWalker } from "./pet/walker";
+import { waitForAppReady } from "./appReady";
 import type {
   PetBehavior,
   PetDialogue,
@@ -33,6 +34,7 @@ interface PetMeetupEvent {
 }
 
 async function boot(): Promise<void> {
+  await waitForAppReady();
   const window = getCurrentWindow();
   const runtime = await invoke<RuntimeConfig>("get_runtime_config", { windowLabel: window.label });
   const loadRuntimePet = async (): Promise<Awaited<ReturnType<typeof loadPet>>> => {

@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
+import { waitForAppReady } from "./appReady";
 import type { AiSettings, ChatMessage } from "./pet/config";
 
 const params = new URLSearchParams(location.search);
@@ -231,6 +232,7 @@ async function bootChat(): Promise<void> {
     }
   });
   document.title = "SakiPet";
+  await waitForAppReady();
   await load();
 }
 

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { waitForAppReady } from "./appReady";
 import { confirmDialog } from "./ui/confirm";
 import { CELL_HEIGHT, CELL_WIDTH, type PetManifest } from "./pet/atlas";
 import type {
@@ -606,4 +607,6 @@ settingsDialog.addEventListener("click", (event) => {
   if (event.target === settingsDialog) settingsDialog.close();
 });
 
-void reloadAll();
+void waitForAppReady()
+  .then(() => reloadAll())
+  .catch((error) => setStatus(errorMessage(error), "error"));

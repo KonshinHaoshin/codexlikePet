@@ -11,7 +11,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{
@@ -642,6 +645,17 @@ impl Default for AppConfig {
 struct AppState {
     config: Mutex<AppConfig>,
     ai: AiRuntime,
+    ready: AtomicBool,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            config: Mutex::new(AppConfig::default()),
+            ai: AiRuntime::default(),
+            ready: AtomicBool::new(false),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -780,6 +794,90 @@ fn config_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("failed to locate app config directory: {error}"))
 }
 
+fn copy_directory_contents(source: &Path, target: &Path) -> Result<(), String> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    fs::create_dir_all(target)
+        .map_err(|error| format!("failed to create migrated data directory: {error}"))?;
+    for entry in fs::read_dir(source)
+        .map_err(|error| format!("failed to read legacy data directory: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("failed to inspect legacy data: {error}"))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("failed to inspect legacy data entry: {error}"))?;
+        if file_type.is_dir() {
+            copy_directory_contents(&source_path, &target_path)?;
+        } else if file_type.is_file() && !target_path.exists() {
+            fs::copy(&source_path, &target_path)
+                .map_err(|error| format!("failed to migrate legacy data: {error}"))?;
+        }
+    }
+    Ok(())
+}
+
+fn find_legacy_config_dir(new_config_dir: &Path) -> Option<PathBuf> {
+    let parent = new_config_dir.parent()?;
+    let entries = fs::read_dir(parent).ok()?;
+    for entry in entries.flatten() {
+        let candidate = entry.path();
+        if candidate == new_config_dir || !candidate.is_dir() {
+            continue;
+        }
+        let config_path = candidate.join(CONFIG_FILE_NAME);
+        let Ok(bytes) = fs::read(config_path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+            continue;
+        };
+        // Requiring the instances field avoids treating an unrelated app's
+        // JSON settings as SakiPet data during the identifier migration.
+        if value.get("instances").is_none() || serde_json::from_value::<AppConfig>(value).is_err() {
+            continue;
+        }
+        return Some(candidate);
+    }
+    None
+}
+
+/// Migrate data from the pre-public-release identifier without embedding the
+/// old personal identifier in the source or future binaries. The legacy
+/// directory is recognized by the SakiPet config shape instead.
+fn migrate_legacy_app_data(app: &tauri::AppHandle) -> Result<(), String> {
+    let new_config_dir = app
+        .path()
+        .app_config_dir()
+        .map_err(|error| format!("failed to locate app config directory: {error}"))?;
+    let new_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to locate app data directory: {error}"))?;
+    let Some(legacy_config_dir) = find_legacy_config_dir(&new_config_dir) else {
+        return Ok(());
+    };
+
+    let legacy_config = legacy_config_dir.join(CONFIG_FILE_NAME);
+    let new_config = new_config_dir.join(CONFIG_FILE_NAME);
+    if !new_config.exists() {
+        fs::create_dir_all(&new_config_dir)
+            .map_err(|error| format!("failed to create app config directory: {error}"))?;
+        fs::copy(&legacy_config, &new_config)
+            .map_err(|error| format!("failed to migrate app config: {error}"))?;
+    }
+
+    if let (Some(legacy_name), Some(data_parent)) =
+        (legacy_config_dir.file_name(), new_data_dir.parent())
+    {
+        let legacy_data_dir = data_parent.join(legacy_name);
+        copy_directory_contents(&legacy_data_dir, &new_data_dir)?;
+    }
+    Ok(())
+}
+
 fn imported_pets_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -866,6 +964,13 @@ fn config_snapshot(app: &tauri::AppHandle) -> Result<AppConfig, String> {
         .lock()
         .map(|config| config.clone())
         .map_err(|_| "app config lock is poisoned".to_string())
+}
+
+#[tauri::command]
+fn is_app_ready(app: tauri::AppHandle) -> bool {
+    app.try_state::<AppState>()
+        .map(|state| state.ready.load(Ordering::Acquire))
+        .unwrap_or(false)
 }
 
 fn update_config<F>(app: &tauri::AppHandle, update: F) -> Result<AppConfig, String>
@@ -2297,12 +2402,21 @@ fn look_direction(app: tauri::AppHandle, window_label: String) -> Option<u8> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Register state before the runtime creates configured WebViews. A
+        // page can execute JavaScript before the setup hook is entered.
+        .manage(AppState::new())
         .setup(|app| {
+            if let Err(error) = migrate_legacy_app_data(&app.handle()) {
+                eprintln!("failed to migrate legacy app data: {error}");
+            }
             let config = load_config(&app.handle());
-            app.manage(AppState {
-                config: Mutex::new(config.clone()),
-                ai: AiRuntime::default(),
-            });
+            let state = app.state::<AppState>();
+            let mut stored_config = state
+                .config
+                .lock()
+                .map_err(|_| "app config lock is poisoned")?;
+            *stored_config = config.clone();
+            drop(stored_config);
             restore_windows(&app.handle(), &config)?;
             #[cfg(any(target_os = "macos", target_os = "windows"))]
             start_fullscreen_overlay_guard(&app.handle());
@@ -2334,9 +2448,11 @@ pub fn run() {
             if !has_visible_pet_config(&app.handle(), &config) {
                 show_pet_manager(&app.handle())?;
             }
+            state.ready.store(true, Ordering::Release);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            is_app_ready,
             look_direction,
             open_pet_manager,
             open_ai_settings,

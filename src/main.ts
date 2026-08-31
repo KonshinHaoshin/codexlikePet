@@ -9,7 +9,13 @@ import { watchCursorDirection } from "./pet/cursorWatcher";
 import { PetStateMachine, type PetAction } from "./pet/stateMachine";
 import { attachDrag, attachGestures, dragState, type DragDirection, type Gesture } from "./pet/window";
 import { PetWalker } from "./pet/walker";
-import type { PetDialogue, PetSettings, PetSettingsEvent, RuntimeConfig } from "./pet/config";
+import type {
+  PetBehavior,
+  PetDialogue,
+  PetSettings,
+  PetSettingsEvent,
+  RuntimeConfig,
+} from "./pet/config";
 import { DEFAULT_DIALOGUE } from "./pet/dialogue";
 
 const PETS_BASE = import.meta.env.BASE_URL + "pets";
@@ -63,6 +69,7 @@ async function boot(): Promise<void> {
   let dragDialogueShown = false;
   let chatRequestId: string | null = null;
   let chatReply = "";
+  let behaviorLookTimer: number | undefined;
 
   const speechPreview = (text: string): string => {
     const chars = [...text.trim()];
@@ -84,6 +91,18 @@ async function boot(): Promise<void> {
         speech.hidden = true;
       }, 180);
     }, duration);
+  };
+
+  const recordPetInteraction = (kind: string): void => {
+    void invoke("record_pet_interaction", { petId: runtime.petId, kind }).catch((error) => {
+      console.warn("failed to update pet life state:", error);
+    });
+  };
+
+  const settlePetActivity = (): void => {
+    void invoke("settle_pet_activity", { petId: runtime.petId }).catch((error) => {
+      console.warn("failed to settle pet life state:", error);
+    });
   };
 
   const sayLine = (trigger: DialogueTrigger): void => {
@@ -115,10 +134,16 @@ async function boot(): Promise<void> {
     stateMachine.setWalking(isWalking, direction);
     if (isWalking) {
       engine.setLook(null);
-      if (startedWalking) sayLine("walk");
+      if (startedWalking) {
+        recordPetInteraction("walk");
+        sayLine("walk");
+      }
     } else if (!dragging) engine.setLook(lastDirection);
     syncAnimation();
-    if (!isWalking) void savePosition();
+    if (!isWalking) {
+      settlePetActivity();
+      void savePosition();
+    }
   });
 
   const syncAnimation = (): void => {
@@ -180,7 +205,50 @@ async function boot(): Promise<void> {
       stateMachine.finishAction();
       if (!dragging) engine.setLook(lastDirection);
       syncAnimation();
+      settlePetActivity();
     });
+  };
+
+  const applyPetBehavior = (behavior: PetBehavior | null | undefined): void => {
+    if (!behavior || paused || settings.quietMode) return;
+    if (behaviorLookTimer !== undefined) globalThis.clearTimeout(behaviorLookTimer);
+    behaviorLookTimer = undefined;
+    switch (behavior.action) {
+      case "walk":
+        walker.walkNow();
+        break;
+      case "sleep":
+        playAction("waiting");
+        break;
+      case "idle":
+        break;
+      default:
+        playAction(behavior.action);
+        break;
+    }
+    if (behavior.action === "idle" && behavior.look) {
+      const directionNames: Record<string, LookDirection> = {
+        up: 0,
+        "up-right": 2,
+        right: 4,
+        "down-right": 6,
+        down: 8,
+        "down-left": 10,
+        left: 12,
+        "up-left": 14,
+      };
+      const numericDirection = Number(behavior.look);
+      const direction = Number.isInteger(numericDirection) && numericDirection >= 0 && numericDirection < 16
+        ? numericDirection as LookDirection
+        : directionNames[behavior.look];
+      if (direction !== undefined) {
+        engine.setLook(direction);
+        behaviorLookTimer = globalThis.setTimeout(() => {
+          behaviorLookTimer = undefined;
+          if (!dragging) engine.setLook(lastDirection);
+        }, behavior.duration);
+      }
+    }
   };
 
   watchCursorDirection((direction) => {
@@ -200,6 +268,7 @@ async function boot(): Promise<void> {
       stateMachine.setDragging(enabled, direction);
       if (enabled && direction && !dragDialogueShown) {
         dragDialogueShown = true;
+        recordPetInteraction("drag");
         sayLine("drag");
       }
       if (enabled) engine.setLook(null);
@@ -231,11 +300,13 @@ async function boot(): Promise<void> {
       clickTimer = undefined;
     }
     void openPetChat();
+    recordPetInteraction("doubleClick");
     playAction("jumping");
   });
 
   attachGestures(petEl, (gesture: Gesture) => {
     if (gesture === "right") {
+      recordPetInteraction("rightClick");
       sayLine("rightClick");
       playAction("failed");
       return;
@@ -243,6 +314,7 @@ async function boot(): Promise<void> {
     if (clickTimer !== undefined) globalThis.clearTimeout(clickTimer);
     clickTimer = globalThis.setTimeout(() => {
       clickTimer = undefined;
+      recordPetInteraction("click");
       sayLine("click");
       playAction("jumping");
     }, 320);
@@ -263,16 +335,22 @@ async function boot(): Promise<void> {
     chatReply += payload.delta;
     showSpeech(chatReply, 7_000);
   });
-  await listen<{ requestId: string; petId: string; message: { content: string; source: string } }>("chat://complete", ({ payload }) => {
+  await listen<{
+    requestId: string;
+    petId: string;
+    message: { content: string; source: string };
+    behavior?: PetBehavior | null;
+  }>("chat://complete", ({ payload }) => {
     if (payload.petId !== runtime.petId) return;
+    applyPetBehavior(payload.behavior);
     if (payload.message.source === "heartbeat") {
-      showSpeech(payload.message.content, 5_200);
+      showSpeech(payload.message.content, payload.behavior?.duration ?? 5_200);
       return;
     }
     if (chatRequestId !== null && payload.requestId !== chatRequestId) return;
     chatRequestId = null;
     chatReply = "";
-    showSpeech(payload.message.content, 7_000);
+    showSpeech(payload.message.content, payload.behavior?.duration ?? 7_000);
   });
   await listen<{ requestId: string; petId: string; message: string }>("chat://error", ({ payload }) => {
     if (payload.petId !== runtime.petId) return;

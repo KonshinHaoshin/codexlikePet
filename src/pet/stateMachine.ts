@@ -1,7 +1,7 @@
 import type { AnimationState } from "./atlas";
 import type { DragDirection } from "./window";
 
-export type PetAction = "waving" | "jumping" | "failed";
+export type PetAction = "waving" | "jumping" | "failed" | "waiting" | "review";
 
 /**
  * Keeps interaction priorities in one place:

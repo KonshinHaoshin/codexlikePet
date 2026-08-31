@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -100,6 +101,68 @@ pub(crate) struct ChatMessage {
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase", default)]
+pub(crate) struct PetLifeState {
+    pub mood: String,
+    pub energy: u8,
+    pub attention: u8,
+    pub bond: u8,
+    pub activity: String,
+    pub last_interaction_at: u64,
+    pub last_spoke_at: u64,
+    pub known_since: u64,
+    pub interaction_count: u64,
+    pub chat_count: u64,
+    pub next_action_at: u64,
+}
+
+impl Default for PetLifeState {
+    fn default() -> Self {
+        let now = now_ms();
+        Self {
+            mood: "calm".to_string(),
+            energy: 78,
+            attention: 55,
+            bond: 0,
+            activity: "idle".to_string(),
+            last_interaction_at: 0,
+            last_spoke_at: 0,
+            known_since: now,
+            interaction_count: 0,
+            chat_count: 0,
+            next_action_at: 0,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct PetBehavior {
+    #[serde(alias = "text")]
+    pub say: String,
+    #[serde(alias = "animation")]
+    pub action: String,
+    #[serde(alias = "emotion")]
+    pub mood: String,
+    pub duration: u64,
+    pub next_action_after: u64,
+    pub look: Option<String>,
+}
+
+impl Default for PetBehavior {
+    fn default() -> Self {
+        Self {
+            say: String::new(),
+            action: "idle".to_string(),
+            mood: "calm".to_string(),
+            duration: 5_200,
+            next_action_after: 1_800,
+            look: None,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(rename_all = "camelCase", default)]
 pub(crate) struct MemoryFact {
     pub id: String,
     pub content: String,
@@ -110,6 +173,7 @@ pub(crate) struct MemoryFact {
     pub created_at: u64,
     pub updated_at: u64,
     pub status: String,
+    pub expires_at: Option<u64>,
 }
 
 impl Default for MemoryFact {
@@ -124,6 +188,7 @@ impl Default for MemoryFact {
             created_at: now_ms(),
             updated_at: now_ms(),
             status: "active".to_string(),
+            expires_at: None,
         }
     }
 }
@@ -145,14 +210,14 @@ pub(crate) struct ChatStarted {
 pub(crate) struct AiRuntime {
     pub tasks: Mutex<HashMap<String, (String, tauri::async_runtime::JoinHandle<()>)>>,
     pub active_pets: Mutex<HashMap<String, String>>,
+    life_states: Mutex<HashMap<String, PetLifeState>>,
+    screen_observation: Mutex<Option<ScreenObservation>>,
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ChatDeltaEvent {
-    request_id: String,
-    pet_id: String,
-    delta: String,
+#[derive(Clone, Debug)]
+struct ScreenObservation {
+    fingerprint: u64,
+    summary: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -161,6 +226,7 @@ struct ChatCompleteEvent {
     request_id: String,
     pet_id: String,
     message: ChatMessage,
+    behavior: Option<PetBehavior>,
 }
 
 #[derive(Clone, Serialize)]
@@ -189,6 +255,10 @@ fn request_id() -> String {
 /// Capture only the display containing the cursor. The screenshot is encoded
 /// directly into memory and is never written to a temporary file.
 pub(crate) async fn capture_desktop_data_url(app: &tauri::AppHandle) -> Result<String, String> {
+    Ok(capture_desktop_observation(app).await?.0)
+}
+
+async fn capture_desktop_observation(app: &tauri::AppHandle) -> Result<(String, u64), String> {
     let cursor = app
         .cursor_position()
         .map_err(|error| format!("无法读取鼠标所在显示器: {error}"))?;
@@ -204,13 +274,14 @@ fn encode_screenshot(
     monitor_origin: (i32, i32),
     pixel_scale: f64,
     app: &tauri::AppHandle,
-) -> Result<String, String> {
+) -> Result<(String, u64), String> {
     #[cfg(target_os = "macos")]
     mask_sakipet_macos(&mut image, monitor_origin, pixel_scale, app);
 
     #[cfg(target_os = "windows")]
     mask_sakipet_windows(&mut image, monitor_origin, pixel_scale, app);
 
+    let fingerprint = screen_fingerprint(&image);
     let dynamic = DynamicImage::ImageRgba8(image);
     let longest = dynamic.width().max(dynamic.height());
     let resized = if longest > 1280 {
@@ -222,10 +293,45 @@ fn encode_screenshot(
     JpegEncoder::new_with_quality(&mut bytes, 70)
         .encode_image(&resized)
         .map_err(|error| format!("压缩桌面截图失败: {error}"))?;
-    Ok(format!(
-        "data:image/jpeg;base64,{}",
-        base64::engine::general_purpose::STANDARD.encode(bytes)
+    Ok((
+        format!(
+            "data:image/jpeg;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        ),
+        fingerprint,
     ))
+}
+
+fn screen_fingerprint(image: &RgbaImage) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let width = image.width().max(1);
+    let height = image.height().max(1);
+    for row in 0..18u32 {
+        for column in 0..32u32 {
+            let x = column.saturating_mul(width - 1) / 31;
+            let y = row.saturating_mul(height - 1) / 17;
+            let pixel = image.get_pixel(x, y).0;
+            // Quantization ignores cursors, blinking carets and tiny animation
+            // changes while still noticing a different application or scene.
+            (pixel[0] / 32, pixel[1] / 32, pixel[2] / 32).hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn parse_visual_observation(raw: String, fallback_changed: bool) -> (bool, String) {
+    if let Some(value) = extract_json(&raw) {
+        let changed = value
+            .get("changed")
+            .and_then(Value::as_bool)
+            .unwrap_or(fallback_changed);
+        let summary = value
+            .get("summary")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        return (changed, clean_reply(summary.to_string(), 600));
+    }
+    (fallback_changed, clean_reply(raw, 600))
 }
 
 #[cfg(target_os = "macos")]
@@ -233,7 +339,7 @@ fn capture_desktop_sync(
     app: &tauri::AppHandle,
     cursor_x: f64,
     cursor_y: f64,
-) -> Result<String, String> {
+) -> Result<(String, u64), String> {
     let monitor = xcap::Monitor::from_point(cursor_x.round() as i32, cursor_y.round() as i32)
         .map_err(|error| format!("无法找到鼠标所在显示器: {error}"))?;
     let origin = (
@@ -252,7 +358,7 @@ fn capture_desktop_sync(
     app: &tauri::AppHandle,
     cursor_x: f64,
     cursor_y: f64,
-) -> Result<String, String> {
+) -> Result<(String, u64), String> {
     let monitor = xcap::Monitor::from_point(cursor_x.round() as i32, cursor_y.round() as i32)
         .map_err(|error| format!("无法找到鼠标所在显示器: {error}"))?;
     let origin = (
@@ -270,7 +376,7 @@ fn capture_desktop_sync(
     app: &tauri::AppHandle,
     _cursor_x: f64,
     _cursor_y: f64,
-) -> Result<String, String> {
+) -> Result<(String, u64), String> {
     let _ = app;
     Err("当前平台暂不支持桌面视觉".to_string())
 }
@@ -283,7 +389,11 @@ fn mask_sakipet_windows(
     app: &tauri::AppHandle,
 ) {
     for (label, window) in app.webview_windows() {
-        if label != "main" && !label.starts_with("pet-") && label != "pet-manager" {
+        if label != "main"
+            && !label.starts_with("pet-")
+            && label != "pet-manager"
+            && label != "ai-settings"
+        {
             continue;
         }
         if !window.is_visible().unwrap_or(false) {
@@ -362,6 +472,194 @@ fn pet_ai_path(app: &tauri::AppHandle, pet_id: &str) -> Result<PathBuf, String> 
     Ok(app_ai_path(app)?.join("pets").join(pet_id))
 }
 
+fn life_state_path(app: &tauri::AppHandle, pet_id: &str) -> Result<PathBuf, String> {
+    Ok(pet_ai_path(app, pet_id)?.join("state.json"))
+}
+
+fn load_pet_life_state_from_disk(app: &tauri::AppHandle, pet_id: &str) -> PetLifeState {
+    let Ok(path) = life_state_path(app, pet_id) else {
+        return PetLifeState::default();
+    };
+    let Ok(bytes) = fs::read(path) else {
+        return PetLifeState::default();
+    };
+    serde_json::from_slice(&bytes).unwrap_or_default()
+}
+
+fn save_pet_life_state(
+    app: &tauri::AppHandle,
+    pet_id: &str,
+    state: &PetLifeState,
+) -> Result<(), String> {
+    let path = life_state_path(app, pet_id)?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("无法创建宠物状态目录: {error}"))?;
+    }
+    let temporary = path.with_extension("json.tmp");
+    fs::write(
+        &temporary,
+        serde_json::to_vec_pretty(state).map_err(|error| error.to_string())?,
+    )
+    .map_err(|error| format!("无法保存宠物状态: {error}"))?;
+    #[cfg(target_os = "windows")]
+    if path.exists() {
+        fs::remove_file(&path).map_err(|error| format!("无法替换宠物状态: {error}"))?;
+    }
+    fs::rename(temporary, path).map_err(|error| format!("无法替换宠物状态: {error}"))
+}
+
+fn advance_pet_life_state(state: &mut PetLifeState, now: u64) {
+    if state.known_since == 0 {
+        state.known_since = now;
+    }
+    if state.last_interaction_at == 0 {
+        return;
+    }
+    let hours = now
+        .saturating_sub(state.last_interaction_at)
+        .checked_div(3_600_000)
+        .unwrap_or(0);
+    if hours > 0 {
+        state.attention = state
+            .attention
+            .saturating_sub((hours.min(10) as u8).saturating_mul(2));
+        if state.activity == "sleeping" || state.mood == "sleepy" {
+            state.energy = state
+                .energy
+                .saturating_add((hours.min(12) as u8).saturating_mul(6))
+                .min(100);
+        }
+    }
+    if state.energy <= 20 {
+        state.mood = "sleepy".to_string();
+        state.activity = "sleeping".to_string();
+    } else if state.energy >= 55 && state.activity == "sleeping" {
+        state.mood = "calm".to_string();
+        state.activity = "idle".to_string();
+    } else if state.attention <= 20 {
+        state.mood = "lonely".to_string();
+    }
+}
+
+fn update_pet_life_state<F>(
+    app: &tauri::AppHandle,
+    pet_id: &str,
+    update: F,
+) -> Result<PetLifeState, String>
+where
+    F: FnOnce(&mut PetLifeState),
+{
+    let now = now_ms();
+    let state = app.state::<AppState>();
+    let mut states = state
+        .ai
+        .life_states
+        .lock()
+        .map_err(|_| "宠物状态锁失败".to_string())?;
+    let life = states
+        .entry(pet_id.to_string())
+        .or_insert_with(|| load_pet_life_state_from_disk(app, pet_id));
+    advance_pet_life_state(life, now);
+    update(life);
+    life.energy = life.energy.min(100);
+    life.attention = life.attention.min(100);
+    life.bond = life.bond.min(100);
+    let snapshot = life.clone();
+    save_pet_life_state(app, pet_id, &snapshot)?;
+    Ok(snapshot)
+}
+
+fn pet_life_state(app: &tauri::AppHandle, pet_id: &str) -> Result<PetLifeState, String> {
+    update_pet_life_state(app, pet_id, |_| {})
+}
+
+fn record_pet_interaction_internal(
+    app: &tauri::AppHandle,
+    pet_id: &str,
+    kind: &str,
+) -> Result<PetLifeState, String> {
+    update_pet_life_state(app, pet_id, |state| {
+        let now = now_ms();
+        let normalized = kind.to_ascii_lowercase();
+        state.last_interaction_at = now;
+        state.interaction_count = state.interaction_count.saturating_add(1);
+        match normalized.as_str() {
+            "doubleclick" | "double_click" | "chat" => {
+                state.attention = state.attention.saturating_add(16).min(100);
+                state.bond = state.bond.saturating_add(1).min(100);
+                state.mood = "happy".to_string();
+                state.activity = "chatting".to_string();
+                if normalized == "chat" {
+                    state.chat_count = state.chat_count.saturating_add(1);
+                }
+            }
+            "drag" => {
+                state.attention = state.attention.saturating_add(6).min(100);
+                state.energy = state.energy.saturating_sub(1);
+                state.mood = "curious".to_string();
+                state.activity = "playing".to_string();
+            }
+            "walk" => {
+                state.attention = state.attention.saturating_add(3).min(100);
+                state.energy = state.energy.saturating_sub(2);
+                state.mood = "content".to_string();
+                state.activity = "walking".to_string();
+            }
+            "speak" | "heartbeat" => {
+                state.last_spoke_at = now;
+                state.activity = "speaking".to_string();
+            }
+            "vision-change" | "vision_change" => {
+                state.attention = state.attention.saturating_add(4).min(100);
+                state.mood = "curious".to_string();
+                state.activity = "watching".to_string();
+            }
+            _ => {
+                state.attention = state.attention.saturating_add(8).min(100);
+                state.bond = state.bond.saturating_add(1).min(100);
+                state.mood = "happy".to_string();
+                state.activity = "playing".to_string();
+            }
+        }
+    })
+}
+
+fn record_pet_behavior_internal(
+    app: &tauri::AppHandle,
+    pet_id: &str,
+    behavior: &PetBehavior,
+) -> Result<PetLifeState, String> {
+    update_pet_life_state(app, pet_id, |state| {
+        let now = now_ms();
+        if !behavior.mood.trim().is_empty() {
+            state.mood = behavior.mood.clone();
+        }
+        state.activity = match behavior.action.as_str() {
+            "walk" => "walking",
+            "sleep" => "sleeping",
+            "waving" | "jumping" => "playing",
+            _ if !behavior.say.trim().is_empty() => "speaking",
+            _ => "idle",
+        }
+        .to_string();
+        if !behavior.say.trim().is_empty() {
+            state.last_spoke_at = now;
+        }
+        if behavior.next_action_after > 0 {
+            state.next_action_at = now.saturating_add(behavior.next_action_after * 1_000);
+        }
+    })
+}
+
+fn settle_pet_activity_internal(
+    app: &tauri::AppHandle,
+    pet_id: &str,
+) -> Result<PetLifeState, String> {
+    update_pet_life_state(app, pet_id, |state| {
+        state.activity = "idle".to_string();
+    })
+}
+
 fn append_jsonl<T: Serialize>(path: PathBuf, value: &T) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| format!("无法创建 AI 数据目录: {error}"))?;
@@ -404,6 +702,7 @@ fn append_message(
 }
 
 fn load_memories(app: &tauri::AppHandle, pet_id: &str) -> Result<Vec<MemoryFact>, String> {
+    let now = now_ms();
     let mut values: HashMap<String, MemoryFact> = HashMap::new();
     for fact in read_jsonl::<MemoryFact>(memories_path(app, pet_id)?) {
         if !fact.id.is_empty() {
@@ -412,7 +711,9 @@ fn load_memories(app: &tauri::AppHandle, pet_id: &str) -> Result<Vec<MemoryFact>
     }
     let mut facts = values
         .into_values()
-        .filter(|fact| fact.status == "active")
+        .filter(|fact| {
+            fact.status == "active" && fact.expires_at.is_none_or(|expires_at| expires_at > now)
+        })
         .collect::<Vec<_>>();
     facts.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
     Ok(facts)
@@ -492,6 +793,7 @@ fn prompt_for(
     profile: &str,
     memories: &[MemoryFact],
     summary: &str,
+    state: &PetLifeState,
     query: &str,
 ) -> String {
     let mut prompt = String::from(
@@ -523,13 +825,31 @@ fn prompt_for(
     if !memories.is_empty() {
         prompt.push_str("\n关于你们共同经历的记忆：\n");
         for memory in memories.iter().take(8) {
-            prompt.push_str(&format!("- {}\n", memory.content));
+            prompt.push_str(&format!("- [{}] {}\n", memory.kind, memory.content));
         }
     }
     if !summary.is_empty() {
         prompt.push_str(&format!("\n较早对话摘要：\n{summary}\n"));
     }
-    prompt.push_str(&format!("\n当前宠物 ID：{pet_id}\n回复要求：使用自然简短的中文，保持角色语气，不要随机描述表情或动作。"));
+    let known_days = now_ms()
+        .saturating_sub(state.known_since)
+        .checked_div(86_400_000)
+        .unwrap_or(0)
+        .saturating_add(1);
+    prompt.push_str(&format!(
+        "\n当前宠物 ID：{pet_id}\n当前宠物状态：\n- 心情：{}\n- 精力：{} / 100\n- 注意力：{} / 100\n- 亲密度：{} / 100\n- 当前活动：{}\n- 认识用户：{} 天\n- 总互动次数：{}\n- 聊天次数：{}\n",
+        state.mood,
+        state.energy,
+        state.attention,
+        state.bond,
+        state.activity,
+        known_days,
+        state.interaction_count,
+        state.chat_count,
+    ));
+    prompt.push_str(
+        "回复要求：使用自然简短的中文，保持角色语气。只返回 JSON，不要 Markdown 或解释，格式为 {\"say\":\"要说的话\",\"action\":\"idle|waving|jumping|waiting|review|walk|sleep\",\"mood\":\"当前心情\",\"look\":\"up|up-right|right|down-right|down|down-left|left|up-left|null\",\"duration\":5200,\"nextActionAfter\":1800}。普通聊天优先使用 idle，只有确实适合时才选择动作；不要凭空描述用户没有提供或观察到的事实。",
+    );
     if !card.post_history_instructions.is_empty() {
         prompt.push_str(&format!(
             "\n\n历史后指令：\n{}",
@@ -593,12 +913,21 @@ fn build_payload(
 ) -> Value {
     match config.provider {
         ProviderKind::OpenaiResponses => {
-            let mut input: Vec<Value> = messages.iter().map(message_value).collect();
+            let mut input: Vec<Value> = messages
+                .iter()
+                .filter(|message| image_data_url.is_none() || message.id != "__vision__")
+                .map(message_value)
+                .collect();
             if let Some(image) = image_data_url {
+                let instruction = messages
+                    .iter()
+                    .find(|message| message.id == "__vision__")
+                    .map(|message| message.content.as_str())
+                    .unwrap_or("请只描述你观察到的桌面内容，不要复述密码、令牌或联系方式。");
                 input.push(json!({
                     "role":"user",
                     "content":[
-                        {"type":"input_text","text":"请只描述你观察到的桌面内容，不要复述密码、令牌或联系方式。"},
+                        {"type":"input_text","text":instruction},
                         {"type":"input_image","image_url":image,"detail":"low"}
                     ]
                 }));
@@ -613,14 +942,23 @@ fn build_payload(
             })
         }
         ProviderKind::AnthropicMessages => {
-            let mut history: Vec<Value> = messages.iter().map(message_value).collect();
+            let mut history: Vec<Value> = messages
+                .iter()
+                .filter(|message| image_data_url.is_none() || message.id != "__vision__")
+                .map(message_value)
+                .collect();
             if let Some(image) = image_data_url {
                 let encoded = image
                     .split_once(',')
                     .map(|(_, value)| value)
                     .unwrap_or(image);
+                let instruction = messages
+                    .iter()
+                    .find(|message| message.id == "__vision__")
+                    .map(|message| message.content.as_str())
+                    .unwrap_or("请只描述你观察到的桌面内容，不要复述密码、令牌或联系方式。");
                 history.push(json!({"role":"user","content":[
-                    {"type":"text","text":"请只描述你观察到的桌面内容，不要复述密码、令牌或联系方式。"},
+                    {"type":"text","text":instruction},
                     {"type":"image","source":{"type":"base64","media_type":"image/jpeg","data":encoded}}
                 ]}));
             }
@@ -636,11 +974,14 @@ fn build_payload(
             let mut history = vec![json!({"role":"system","content":prompt})];
             history.extend(messages.iter().map(|message| {
                 if image_data_url.is_some() && message.id == "__vision__" {
+                    let instruction = message.content.as_str();
                     json!({"role":"user","content":[
-                        {"type":"text","text":"请只描述你观察到的桌面内容，不要复述密码、令牌或联系方式。"},
+                        {"type":"text","text":instruction},
                         {"type":"image_url","image_url":{"url":image_data_url.unwrap()}}
                     ]})
-                } else { message_value(message) }
+                } else {
+                    message_value(message)
+                }
             }));
             json!({
                 "model": config.model,
@@ -844,13 +1185,16 @@ fn load_profile(app: &tauri::AppHandle) -> String {
 }
 
 fn load_shared_memories(app: &tauri::AppHandle) -> Vec<MemoryFact> {
+    let now = now_ms();
     let path = profile_path(app).unwrap_or_default();
     fs::read_to_string(path)
         .ok()
         .and_then(|value| serde_json::from_str::<Vec<MemoryFact>>(&value).ok())
         .unwrap_or_default()
         .into_iter()
-        .filter(|fact| !fact.id.is_empty())
+        .filter(|fact| {
+            !fact.id.is_empty() && fact.expires_at.is_none_or(|expires_at| expires_at > now)
+        })
         .collect::<Vec<_>>()
 }
 
@@ -949,7 +1293,60 @@ fn extract_json(text: &str) -> Option<Value> {
         .trim_start_matches("```")
         .trim_end_matches("```")
         .trim();
-    serde_json::from_str(clean).ok()
+    if let Ok(value) = serde_json::from_str(clean) {
+        return Some(value);
+    }
+    let start = clean.find('{')?;
+    let end = clean.rfind('}')?;
+    (start < end)
+        .then(|| serde_json::from_str(&clean[start..=end]).ok())
+        .flatten()
+}
+
+fn normalize_behavior(mut behavior: PetBehavior) -> PetBehavior {
+    behavior.action = match behavior.action.trim().to_ascii_lowercase().as_str() {
+        "idle" | "waving" | "jumping" | "waiting" | "review" | "walk" | "sleep" => {
+            behavior.action.trim().to_ascii_lowercase()
+        }
+        _ => "idle".to_string(),
+    };
+    behavior.mood = behavior.mood.trim().chars().take(32).collect::<String>();
+    if behavior.mood.is_empty() {
+        behavior.mood = "calm".to_string();
+    }
+    behavior.look = behavior.look.take().and_then(|look| {
+        let look = look.trim().to_ascii_lowercase();
+        let valid_name = matches!(
+            look.as_str(),
+            "up" | "up-right" | "right" | "down-right" | "down" | "down-left" | "left" | "up-left"
+        );
+        let valid_index = look.parse::<u8>().ok().filter(|value| *value < 16);
+        if valid_name || valid_index.is_some() {
+            Some(look)
+        } else {
+            None
+        }
+    });
+    behavior.say = clean_reply(behavior.say, 600);
+    behavior.duration = behavior.duration.clamp(2_500, 12_000);
+    behavior.next_action_after = behavior.next_action_after.clamp(30, 7_200);
+    behavior
+}
+
+fn parse_behavior_response(raw: String, max_chars: usize) -> (String, PetBehavior) {
+    if let Some(value) = extract_json(&raw) {
+        if let Ok(behavior) = serde_json::from_value::<PetBehavior>(value) {
+            let mut behavior = normalize_behavior(behavior);
+            behavior.say = clean_reply(behavior.say, max_chars);
+            return (behavior.say.clone(), behavior);
+        }
+    }
+    let say = clean_reply(raw, max_chars);
+    let behavior = normalize_behavior(PetBehavior {
+        say: say.clone(),
+        ..PetBehavior::default()
+    });
+    (say, behavior)
 }
 
 #[derive(Clone, Debug)]
@@ -961,6 +1358,7 @@ struct MemoryOperation {
     scope: String,
     importance: f64,
     confidence: f64,
+    expires_in_hours: Option<u64>,
 }
 
 async fn extract_memories(
@@ -968,7 +1366,7 @@ async fn extract_memories(
     config: &ModelEndpointConfig,
     messages: &[ChatMessage],
 ) -> Result<Vec<MemoryOperation>, String> {
-    let prompt = "你是记忆提取器。只保留稳定、未来仍有用的用户资料或共同经历，不记录一次性闲聊。只返回 JSON：{\"facts\":[{\"action\":\"add|update|forget\",\"target\":\"要修改或遗忘的原记忆内容，可为空\",\"content\":\"新的记忆内容\",\"kind\":\"preference|profile|event\",\"scope\":\"shared|pet\",\"importance\":0.0,\"confidence\":0.0}]}。没有记忆就返回空数组。不要把普通寒暄写入记忆。";
+    let prompt = "你是记忆提取器。只保留未来仍有用的信息，不记录一次性闲聊。记忆类型 kind 使用 preference（偏好）、profile（资料）、event（共同经历）、impression（宠物对用户的印象）、temporary（今天或短期状态）、relationship（关系事件）。只返回 JSON：{\"facts\":[{\"action\":\"add|update|forget\",\"target\":\"要修改或遗忘的原记忆内容，可为空\",\"content\":\"新的记忆内容\",\"kind\":\"preference|profile|event|impression|temporary|relationship\",\"scope\":\"shared|pet\",\"importance\":0.0,\"confidence\":0.0,\"expiresInHours\":24}]}。temporary 必须设置 expiresInHours（通常 24 到 72）；长期记忆省略它。没有记忆就返回空数组。不要把普通寒暄写入记忆。";
     let value = call_stream(client, config, prompt, messages, None, false, |_| {}).await?;
     let Some(value) = extract_json(&value) else {
         return Ok(Vec::new());
@@ -1033,6 +1431,10 @@ async fn extract_memories(
                     .and_then(Value::as_f64)
                     .unwrap_or(0.7)
                     .clamp(0.0, 1.0),
+                expires_in_hours: fact
+                    .get("expiresInHours")
+                    .and_then(Value::as_u64)
+                    .map(|hours| hours.clamp(1, 24 * 30)),
             })
         })
         .collect())
@@ -1059,6 +1461,10 @@ fn memory_from_operation(operation: &MemoryOperation, id: Option<String>) -> Mem
         created_at: now,
         updated_at: now,
         status: "active".to_string(),
+        expires_at: operation
+            .expires_in_hours
+            .or_else(|| (operation.kind == "temporary").then_some(48))
+            .map(|hours| now.saturating_add(hours * 3_600_000)),
     }
 }
 
@@ -1187,12 +1593,14 @@ async fn run_chat_task(
     } else {
         Vec::new()
     };
+    let state = record_pet_interaction_internal(&app, &pet_id, "chat")?;
     let prompt = prompt_for(
         &card,
         &pet_id,
         &load_profile(&app),
         &memory,
         &load_summary(&app, &pet_id),
+        &state,
         &content,
     );
     let recent = history_for_prompt(&messages, ai.max_recent_messages);
@@ -1201,29 +1609,8 @@ async fn run_chat_task(
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|error| error.to_string())?;
-    let app_for_delta = app.clone();
-    let request_for_delta = request_id.clone();
-    let pet_for_delta = pet_id.clone();
-    let reply = call_stream(
-        &client,
-        &endpoint,
-        &prompt,
-        &recent,
-        None,
-        true,
-        move |delta| {
-            let _ = app_for_delta.emit(
-                "chat://delta",
-                ChatDeltaEvent {
-                    request_id: request_for_delta.clone(),
-                    pet_id: pet_for_delta.clone(),
-                    delta,
-                },
-            );
-        },
-    )
-    .await?;
-    let reply = clean_reply(reply, 600);
+    let reply = call_stream(&client, &endpoint, &prompt, &recent, None, true, |_| {}).await?;
+    let (reply, behavior) = parse_behavior_response(reply, 600);
     if reply.is_empty() {
         return Err("模型没有返回文字".to_string());
     }
@@ -1236,12 +1623,14 @@ async fn run_chat_task(
         vision_summary: None,
     };
     append_message(&app, &pet_id, &assistant)?;
+    record_pet_behavior_internal(&app, &pet_id, &behavior)?;
     let _ = app.emit(
         "chat://complete",
         ChatCompleteEvent {
             request_id,
             pet_id: pet_id.clone(),
             message: assistant.clone(),
+            behavior: Some(behavior),
         },
     );
     let memory_messages = {
@@ -1418,6 +1807,28 @@ fn test_image_data_url() -> Result<String, String> {
 #[tauri::command]
 pub(crate) async fn capture_desktop(app: tauri::AppHandle) -> Result<String, String> {
     capture_desktop_data_url(&app).await
+}
+
+#[tauri::command]
+pub(crate) fn get_pet_state(app: tauri::AppHandle, pet_id: String) -> Result<PetLifeState, String> {
+    pet_life_state(&app, &pet_id)
+}
+
+#[tauri::command]
+pub(crate) fn record_pet_interaction(
+    app: tauri::AppHandle,
+    pet_id: String,
+    kind: String,
+) -> Result<PetLifeState, String> {
+    record_pet_interaction_internal(&app, &pet_id, &kind)
+}
+
+#[tauri::command]
+pub(crate) fn settle_pet_activity(
+    app: tauri::AppHandle,
+    pet_id: String,
+) -> Result<PetLifeState, String> {
+    settle_pet_activity_internal(&app, &pet_id)
 }
 
 #[tauri::command]
@@ -1692,15 +2103,20 @@ async fn run_heartbeat(app: tauri::AppHandle, pet_id: String) -> Result<(), Stri
     } else {
         Vec::new()
     };
+    let state = pet_life_state(&app, &pet_id)?;
+    if state.next_action_at > now_ms() {
+        return Ok(());
+    }
     let mut prompt = prompt_for(
         &card,
         &pet_id,
         &load_profile(&app),
         &memory,
         &load_summary(&app, &pet_id),
+        &state,
         "heartbeat",
     );
-    prompt.push_str("\n\n这是一次安静的 heartbeat。只有在确实有自然、和当前关系有关的话可说时才回复；否则只返回 NO_REPLY。回复最多 80 个中文字符，不要提及你是模型。");
+    prompt.push_str("\n\n这是一次安静的 heartbeat。只有在确实有自然、和当前关系有关的话可说时才回复；否则让 say 为空。回复最多 80 个中文字符，不要提及你是模型。");
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(120))
@@ -1725,22 +2141,58 @@ async fn run_heartbeat(app: tauri::AppHandle, pet_id: String) -> Result<(), Stri
         // Mark the hour before capturing so a denied permission cannot cause a
         // rapid retry loop. A failed capture simply falls back to normal chat.
         LAST_VISION_MS.store(now_ms(), Ordering::Relaxed);
-        if let Ok(image) = capture_desktop_data_url(&app).await {
-            let vision_endpoint = ai.vision_model.clone().expect("checked above");
-            let vision_message = ChatMessage {
-                id: "__vision__".to_string(),
-                role: "user".to_string(),
-                content: "请观察这张桌面截图，只返回事实性的中文摘要；不要复述密码、令牌、私人联系方式或其他敏感文本。".to_string(),
-                timestamp: now_ms(),
-                source: "vision".to_string(),
-                vision_summary: None,
-            };
-            if let Ok(summary) = call_stream(&client, &vision_endpoint, "你是一个严格的桌面视觉观察器。只描述看得见的非敏感事实，不进行推断，不输出角色台词。", &[vision_message], Some(&image), false, |_| {}).await {
-                let summary = clean_reply(summary, 600);
-                if !summary.is_empty() {
-                    vision_summary = Some(summary);
-                    prompt.push_str("\n\n当前桌面观察（仅作为上下文，不要复述敏感信息）：\n");
-                    prompt.push_str(vision_summary.as_deref().unwrap_or_default());
+        if let Ok((image, fingerprint)) = capture_desktop_observation(&app).await {
+            let (previous_fingerprint, previous_summary) = app
+                .state::<AppState>()
+                .ai
+                .screen_observation
+                .lock()
+                .map(|mut observation| {
+                    let previous = observation.clone();
+                    *observation = Some(ScreenObservation {
+                        fingerprint,
+                        summary: previous
+                            .as_ref()
+                            .map(|item| item.summary.clone())
+                            .unwrap_or_default(),
+                    });
+                    (
+                        previous.as_ref().map(|item| item.fingerprint),
+                        previous.map(|item| item.summary).unwrap_or_default(),
+                    )
+                })
+                .unwrap_or((None, String::new()));
+            // The first screenshot is only a baseline. A pixel-level change is
+            // sent to the vision model, which decides whether it is meaningful
+            // enough to become a pet comment.
+            let fingerprint_changed =
+                previous_fingerprint.is_some_and(|value| value != fingerprint);
+            if fingerprint_changed {
+                let vision_endpoint = ai.vision_model.clone().expect("checked above");
+                let vision_message = ChatMessage {
+                    id: "__vision__".to_string(),
+                    role: "user".to_string(),
+                    content: format!(
+                        "请观察这张桌面截图，并与上一次观察进行比较。上一次观察摘要：{}。只返回 JSON：{{\"changed\":true/false,\"summary\":\"有意义的界面或活动变化\"}}。不要复述密码、令牌、私人联系方式或其他敏感文本。",
+                        if previous_summary.is_empty() { "无" } else { &previous_summary }
+                    ),
+                    timestamp: now_ms(),
+                    source: "vision".to_string(),
+                    vision_summary: None,
+                };
+                if let Ok(summary) = call_stream(&client, &vision_endpoint, "你是一个严格的桌面视觉观察器。只比较两次截图中看得见的非敏感事实，不进行推断，不输出角色台词。", &[vision_message], Some(&image), false, |_| {}).await {
+                    let (meaningful_change, summary) = parse_visual_observation(summary, true);
+                    if meaningful_change && !summary.is_empty() {
+                        vision_summary = Some(summary);
+                        let _ = record_pet_interaction_internal(&app, &pet_id, "vision-change");
+                        prompt.push_str("\n\n当前桌面观察（仅作为上下文，不要复述敏感信息）：\n");
+                        prompt.push_str(vision_summary.as_deref().unwrap_or_default());
+                        if let Ok(mut observation) = app.state::<AppState>().ai.screen_observation.lock() {
+                            if let Some(observation) = observation.as_mut() {
+                                observation.summary = vision_summary.clone().unwrap_or_default();
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1755,7 +2207,7 @@ async fn run_heartbeat(app: tauri::AppHandle, pet_id: String) -> Result<(), Stri
         |_| {},
     )
     .await?;
-    let result = clean_reply(result, 80);
+    let (result, behavior) = parse_behavior_response(result, 80);
     if result.is_empty() || result.eq_ignore_ascii_case("NO_REPLY") {
         return Ok(());
     }
@@ -1768,12 +2220,14 @@ async fn run_heartbeat(app: tauri::AppHandle, pet_id: String) -> Result<(), Stri
         vision_summary,
     };
     append_message(&app, &pet_id, &message)?;
+    record_pet_behavior_internal(&app, &pet_id, &behavior)?;
     let _ = app.emit(
         "chat://complete",
         ChatCompleteEvent {
             request_id: format!("heartbeat-{}", now_ms()),
             pet_id,
             message,
+            behavior: Some(behavior),
         },
     );
     Ok(())
@@ -1898,6 +2352,46 @@ mod tests {
     }
 
     #[test]
+    fn behavior_response_accepts_character_card_aliases_and_limits_actions() {
+        let (say, behavior) = parse_behavior_response(
+            r#"{"text":"欢迎回来。","animation":"jumping","emotion":"开心","look":"right","duration":99999,"nextActionAfter":1}"#.to_string(),
+            80,
+        );
+        assert_eq!(say, "欢迎回来。");
+        assert_eq!(behavior.action, "jumping");
+        assert_eq!(behavior.mood, "开心");
+        assert_eq!(behavior.look.as_deref(), Some("right"));
+        assert_eq!(behavior.duration, 12_000);
+        assert_eq!(behavior.next_action_after, 30);
+
+        let (_, fallback) = parse_behavior_response(
+            r#"{"say":"不执行工具","action":"run-shell"}"#.to_string(),
+            80,
+        );
+        assert_eq!(fallback.action, "idle");
+    }
+
+    #[test]
+    fn pet_life_state_decays_attention_and_becomes_lonely() {
+        let mut state = PetLifeState::default();
+        state.attention = 35;
+        state.last_interaction_at = now_ms().saturating_sub(10 * 3_600_000);
+        advance_pet_life_state(&mut state, now_ms());
+        assert!(state.attention <= 20);
+        assert_eq!(state.mood, "lonely");
+    }
+
+    #[test]
+    fn visual_observation_can_reject_pixel_only_changes() {
+        let (changed, summary) = parse_visual_observation(
+            r#"{"changed":false,"summary":"只是光标移动"}"#.to_string(),
+            true,
+        );
+        assert!(!changed);
+        assert_eq!(summary, "只是光标移动");
+    }
+
+    #[test]
     fn sse_boundary_accepts_lf_and_crlf() {
         assert_eq!(sse_boundary("data: {}\n\nrest"), Some((8, 2)));
         assert_eq!(sse_boundary("data: {}\r\n\r\nrest"), Some((8, 4)));
@@ -1935,7 +2429,7 @@ mod tests {
             creator_notes: "不应该发给模型".to_string(),
             ..CharacterCard::default()
         };
-        let prompt = prompt_for(&card, "saki", "", &[], "", "");
+        let prompt = prompt_for(&card, "saki", "", &[], "", &PetLifeState::default(), "");
         assert!(prompt.find("只能进行聊天").unwrap() < prompt.find("角色提示").unwrap());
         assert!(!prompt.contains("不应该发给模型"));
     }
@@ -1992,7 +2486,7 @@ mod tests {
             &[ChatMessage {
                 id: "__vision__".to_string(),
                 role: "user".to_string(),
-                content: "观察".to_string(),
+                content: "比较上一次观察，判断是否换了界面".to_string(),
                 timestamp: now_ms(),
                 source: "vision".to_string(),
                 vision_summary: None,
@@ -2003,6 +2497,10 @@ mod tests {
         assert_eq!(
             payload["messages"][1]["content"][1]["image_url"]["url"],
             "data:image/jpeg;base64,abc"
+        );
+        assert_eq!(
+            payload["messages"][1]["content"][0]["text"],
+            "比较上一次观察，判断是否换了界面"
         );
     }
 }

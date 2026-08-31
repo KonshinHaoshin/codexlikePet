@@ -41,6 +41,17 @@ export class PetWalker {
     this.schedule();
   }
 
+  /** Start one autonomous walk immediately, for an AI behavior decision. */
+  walkNow(): void {
+    if (!this.enabled || this.quietMode || this.walking || dragState.current) return;
+    this.walkToken += 1;
+    if (this.timer !== null) {
+      window.clearTimeout(this.timer);
+      this.timer = null;
+    }
+    void this.walk();
+  }
+
   stop(): void {
     this.walkToken += 1;
     if (this.timer !== null) {

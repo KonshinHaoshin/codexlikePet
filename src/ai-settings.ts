@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { confirmDialog, promptDialog } from "./ui/confirm";
 import type {
   AiSettings,
   InstalledPetInfo,
@@ -253,7 +254,7 @@ function renderMemories(memories: MemoryFact[]): void {
     edit.className = "small-button";
     edit.textContent = "编辑";
     edit.addEventListener("click", async () => {
-      const content = window.prompt("修改这条记忆", memory.content)?.trim();
+      const content = (await promptDialog(memory.content, { title: "修改这条记忆" }))?.trim();
       if (!content || content === memory.content) return;
       try {
         await invoke(memoryScope() === "shared" ? "update_shared_memory" : "update_memory", {
@@ -270,7 +271,7 @@ function renderMemories(memories: MemoryFact[]): void {
     remove.className = "small-button danger-button";
     remove.textContent = "删除";
     remove.addEventListener("click", async () => {
-      if (!window.confirm("删除这条记忆吗？")) return;
+      if (!(await confirmDialog("删除这条记忆吗？"))) return;
       try {
         await invoke(memoryScope() === "shared" ? "delete_shared_memory" : "delete_memory", {
           ...(memoryScope() === "shared" ? {} : { petId: memoryPet.value }),
@@ -365,7 +366,7 @@ saveAiButton.addEventListener("click", () => {
 testChatButton.addEventListener("click", () => void testAiProvider(false));
 testVisionButton.addEventListener("click", () => void testAiProvider(true));
 clearChatKey.addEventListener("click", async () => {
-  if (!window.confirm("删除已保存的聊天 API Key 吗？")) return;
+  if (!(await confirmDialog("删除已保存的聊天 API Key 吗？"))) return;
   try {
     await invoke("delete_ai_secret", { reference: "chat-api-key" });
     chatKey.value = "";
@@ -375,7 +376,7 @@ clearChatKey.addEventListener("click", async () => {
   }
 });
 clearVisionKey.addEventListener("click", async () => {
-  if (!window.confirm("删除已保存的视觉 API Key 吗？")) return;
+  if (!(await confirmDialog("删除已保存的视觉 API Key 吗？"))) return;
   try {
     await invoke("delete_ai_secret", { reference: "vision-api-key" });
     visionKey.value = "";
@@ -387,7 +388,7 @@ clearVisionKey.addEventListener("click", async () => {
 memoryPet.addEventListener("change", () => void refreshMemories());
 refreshMemoriesButton.addEventListener("click", () => void refreshMemories());
 clearMemoriesButton.addEventListener("click", async () => {
-  if (!window.confirm("清空当前范围的全部记忆吗？此操作不可恢复。")) return;
+  if (!(await confirmDialog("清空当前范围的全部记忆吗？此操作不可恢复。"))) return;
   try {
     await invoke(
       memoryScope() === "shared" ? "clear_shared_memories" : "clear_memories",

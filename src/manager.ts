@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { confirmDialog } from "./ui/confirm";
 import { CELL_HEIGHT, CELL_WIDTH, type PetManifest } from "./pet/atlas";
 import type {
   InstalledPetInfo,
@@ -146,7 +147,7 @@ function createInstanceRow(instance: PetInstanceInfo): HTMLElement {
     remove.className = "small-button danger-button";
     remove.textContent = "移除实例";
     remove.addEventListener("click", async () => {
-      if (!window.confirm("只移除这个显示实例，不会删除宠物资源。继续吗？")) return;
+      if (!(await confirmDialog("只移除这个显示实例，不会删除宠物资源。继续吗？"))) return;
       setBusy(remove, true);
       try {
         await invoke("remove_pet_instance", { instanceId: instance.id });
@@ -450,7 +451,7 @@ function render(): void {
       remove.className = "secondary-button danger-button";
       remove.textContent = "删除资源";
       remove.addEventListener("click", async () => {
-        if (!window.confirm("删除后需要重新导入宠物包，确定继续吗？")) return;
+        if (!(await confirmDialog("删除后需要重新导入宠物包，确定继续吗？"))) return;
         setBusy(remove, true);
         try {
           await invoke("remove_imported_pet", { petId: pet.info.id });

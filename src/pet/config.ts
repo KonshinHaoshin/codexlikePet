@@ -93,6 +93,29 @@ export interface AiSettings {
   desktopVisionEnabled: boolean;
 }
 
+export interface PetLifeState {
+  mood: string;
+  energy: number;
+  attention: number;
+  bond: number;
+  activity: string;
+  lastInteractionAt: number;
+  lastSpokeAt: number;
+  knownSince: number;
+  interactionCount: number;
+  chatCount: number;
+  nextActionAt: number;
+}
+
+export interface PetBehavior {
+  say: string;
+  action: "idle" | "waving" | "jumping" | "waiting" | "review" | "walk" | "sleep";
+  mood: string;
+  duration: number;
+  nextActionAfter: number;
+  look?: string | null;
+}
+
 export interface MemoryFact {
   id: string;
   content: string;
@@ -103,6 +126,7 @@ export interface MemoryFact {
   createdAt: number;
   updatedAt: number;
   status: string;
+  expiresAt?: number | null;
 }
 
 export interface ChatMessage {
@@ -112,4 +136,5 @@ export interface ChatMessage {
   timestamp: number;
   source: string;
   visionSummary?: string | null;
+  behavior?: PetBehavior | null;
 }

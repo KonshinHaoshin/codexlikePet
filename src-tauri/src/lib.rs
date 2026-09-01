@@ -33,6 +33,10 @@ const PET_HEIGHT: f64 = 208.0;
 const SPRITESHEET_WIDTH: u32 = 1536;
 const SPRITESHEET_HEIGHT: u32 = 2288;
 const CONFIG_FILE_NAME: &str = "config.json";
+// Transparent always-on-top webviews get misjudged as occluded by Chromium,
+// which freezes timers (walker), rAF (animation) and input handling. Keep the
+// throttling disabled on every webview, and keep wry's default feature flags.
+const BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --remote-debugging-port=9333";
 
 #[cfg(target_os = "macos")]
 mod macos_overlay {
@@ -1381,6 +1385,7 @@ fn create_pet_window(
         WebviewUrl::App(format!("index.html?instance={}", instance.id).into()),
     )
     .title("SakiPet")
+    .additional_browser_args(BROWSER_ARGS)
     .inner_size(
         PET_WIDTH * pet_settings.scale,
         PET_HEIGHT * pet_settings.scale,
@@ -1475,6 +1480,10 @@ fn show_pet_manager(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(window) = app.get_webview_window("pet-manager") else {
         return Err("pet manager window is not available".to_string());
     };
+    // show() alone cannot restore a minimized window on Windows.
+    if window.is_minimized().unwrap_or(false) {
+        let _ = window.unminimize();
+    }
     window
         .show()
         .map_err(|error| format!("failed to show pet manager: {error}"))?;
@@ -1488,6 +1497,10 @@ fn show_ai_settings(app: &tauri::AppHandle) -> Result<(), String> {
     let Some(window) = app.get_webview_window("ai-settings") else {
         return Err("AI settings window is not available".to_string());
     };
+    // show() alone cannot restore a minimized window on Windows.
+    if window.is_minimized().unwrap_or(false) {
+        let _ = window.unminimize();
+    }
     window
         .show()
         .map_err(|error| format!("failed to show AI settings: {error}"))?;
@@ -1505,12 +1518,16 @@ fn chat_window_label(pet_id: &str) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn open_pet_chat(app: tauri::AppHandle, pet_id: String) -> Result<(), String> {
+async fn open_pet_chat(app: tauri::AppHandle, pet_id: String) -> Result<(), String> {
     if !pet_exists(&app, &pet_id) {
         return Err("宠物资源不存在或校验失败".to_string());
     }
     let label = chat_window_label(&pet_id)?;
     if let Some(window) = app.get_webview_window(&label) {
+        // show() alone cannot restore a minimized window on Windows.
+        if window.is_minimized().unwrap_or(false) {
+            let _ = window.unminimize();
+        }
         window.show().map_err(|error| error.to_string())?;
         window.set_focus().map_err(|error| error.to_string())?;
         return Ok(());
@@ -1541,33 +1558,40 @@ fn open_pet_chat(app: tauri::AppHandle, pet_id: String) -> Result<(), String> {
     .always_on_top(true)
     .skip_taskbar(false)
     .resizable(true)
+    .additional_browser_args(BROWSER_ARGS)
+    // WebView2 teardown can silently fail and leave a ghost HWND behind, so
+    // the native close button is disabled; the page closes via `hide_pet_chat`.
+    .closable(false)
     .visible(true)
     .build()
     .map_err(|error| format!("failed to create pet chat window: {error}"))?;
-    let app_for_move = app.clone();
-    let pet_id_for_move = pet_id.clone();
-    let window_for_move = window.clone();
-    window.on_window_event(move |event| {
-        if let WindowEvent::Moved(position) = event {
-            let Ok(scale_factor) = window_for_move.scale_factor() else {
-                return;
-            };
-            let logical = PetPosition {
-                x: position.x as f64 / scale_factor,
-                y: position.y as f64 / scale_factor,
-            };
-            if let Err(error) = update_config(&app_for_move, |config| {
-                config
-                    .chat_positions
-                    .insert(pet_id_for_move.clone(), logical.clone());
-                Ok(())
-            }) {
-                eprintln!("failed to save pet chat position: {error}");
-            }
-        }
-    });
+    // Close/hide and position persistence for this window are handled by the
+    // global `on_window_event` hook; per-window listeners registered after
+    // creation never fire.
     window.set_focus().map_err(|error| error.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn hide_pet_chat(app: tauri::AppHandle, pet_id: String) -> Result<(), String> {
+    if !is_safe_id(&pet_id) {
+        return Err("invalid pet id".to_string());
+    }
+    let window = app
+        .get_webview_window(&chat_window_label(&pet_id)?)
+        .ok_or_else(|| "chat window is not available".to_string())?;
+    // Persist the closing position so the next open restores it.
+    if let (Ok(position), Ok(scale_factor)) = (window.outer_position(), window.scale_factor()) {
+        let logical = PetPosition {
+            x: position.x as f64 / scale_factor,
+            y: position.y as f64 / scale_factor,
+        };
+        let _ = update_config(&app, |config| {
+            config.chat_positions.insert(pet_id.clone(), logical);
+            Ok(())
+        });
+    }
+    window.hide().map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -2405,6 +2429,41 @@ pub fn run() {
         // Register state before the runtime creates configured WebViews. A
         // page can execute JavaScript before the setup hook is entered.
         .manage(AppState::new())
+        .on_window_event(|window, event| {
+            let label = window.label();
+            match event {
+                // WebView2 teardown can silently fail and leave the HWND
+                // alive, so utility windows hide on close instead of being
+                // destroyed. This must be a global hook: per-window listeners
+                // attached after creation never receive events.
+                WindowEvent::CloseRequested { api, .. }
+                    if label == "pet-manager"
+                        || label == "ai-settings"
+                        || label.starts_with("pet-chat-") =>
+                {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+                WindowEvent::Moved(position) if label.starts_with("pet-chat-") => {
+                    let Ok(scale_factor) = window.scale_factor() else {
+                        return;
+                    };
+                    let logical = PetPosition {
+                        x: position.x as f64 / scale_factor,
+                        y: position.y as f64 / scale_factor,
+                    };
+                    if let Err(error) = update_config(window.app_handle(), |config| {
+                        config
+                            .chat_positions
+                            .insert(label.trim_start_matches("pet-chat-").to_string(), logical);
+                        Ok(())
+                    }) {
+                        eprintln!("failed to save pet chat position: {error}");
+                    }
+                }
+                _ => {}
+            }
+        })
         .setup(|app| {
             if let Err(error) = migrate_legacy_app_data(&app.handle()) {
                 eprintln!("failed to migrate legacy app data: {error}");
@@ -2427,6 +2486,9 @@ pub fn run() {
             if let Err(error) = macos_dock_menu::install(&app.handle()) {
                 eprintln!("failed to install Dock menu: {error}");
             }
+            // Belt and suspenders: the global `on_window_event` hook below
+            // already prevents close for these windows; keep the per-window
+            // handlers in case one dispatch path fails.
             if let Some(manager) = app.get_webview_window("pet-manager") {
                 let manager_for_close = manager.clone();
                 manager.on_window_event(move |event| {
@@ -2457,6 +2519,7 @@ pub fn run() {
             open_pet_manager,
             open_ai_settings,
             open_pet_chat,
+            hide_pet_chat,
             get_pet_catalog,
             get_pet_settings,
             get_pet_instances,

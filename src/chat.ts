@@ -11,6 +11,7 @@ const input = document.querySelector<HTMLTextAreaElement>("#input")!;
 const composer = document.querySelector<HTMLFormElement>("#composer")!;
 const sendButton = document.querySelector<HTMLButtonElement>("#send")!;
 const stopButton = document.querySelector<HTMLButtonElement>("#stop")!;
+const closeButton = document.querySelector<HTMLButtonElement>("#close")!;
 const status = document.querySelector<HTMLElement>("#status")!;
 const setup = document.querySelector<HTMLElement>("#setup")!;
 const chatWindow = getCurrentWindow();
@@ -217,6 +218,16 @@ async function bootChat(): Promise<void> {
     sendButton.disabled = false;
     stopButton.hidden = true;
     setStatus("已停止");
+  });
+  // The native close button is disabled on this window (WebView2 teardown can
+  // leave a ghost HWND behind), so closing goes through this command instead.
+  closeButton.addEventListener("click", () => {
+    closeButton.disabled = true;
+    void invoke("hide_pet_chat", { petId })
+      .catch((error) => setStatus(String(error)))
+      .finally(() => {
+        closeButton.disabled = false;
+      });
   });
   const openSettings = (): void => { void invoke("open_ai_settings"); };
   document.querySelector("#setup-button")?.addEventListener("click", openSettings);

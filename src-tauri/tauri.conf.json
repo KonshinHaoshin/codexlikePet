@@ -30,7 +30,8 @@
         "minimizable": false,
         "maximizable": false,
         "fullscreen": false,
-        "visible": true
+        "visible": true,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling --remote-debugging-port=9333"
       },
       {
         "label": "pet-manager",

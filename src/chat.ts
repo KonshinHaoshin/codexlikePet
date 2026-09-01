@@ -55,7 +55,7 @@ function lastSessionMessage(): ChatMessage | undefined {
 }
 
 async function resizeChatWindow(showHistory: boolean): Promise<void> {
-  await chatWindow.setSize(new LogicalSize(showHistory ? 420 : 320, showHistory ? 560 : 170));
+  await chatWindow.setSize(new LogicalSize(showHistory ? 420 : 320, showHistory ? 560 : 230));
 }
 
 async function setHistoryVisible(visible: boolean): Promise<void> {

@@ -1552,16 +1552,15 @@ async fn open_pet_chat(app: tauri::AppHandle, pet_id: String) -> Result<(), Stri
         WebviewUrl::App(format!("chat.html?petId={pet_id}").into()),
     )
     .title("")
-    .inner_size(320.0, 170.0)
+    .inner_size(320.0, 230.0)
     .position(position.0, position.1)
-    .decorations(true)
+    .decorations(false)
     .always_on_top(true)
     .skip_taskbar(false)
-    .resizable(true)
+    .resizable(false)
     .additional_browser_args(BROWSER_ARGS)
-    // WebView2 teardown can silently fail and leave a ghost HWND behind, so
-    // the native close button is disabled; the page closes via `hide_pet_chat`.
-    .closable(false)
+    // The window is borderless, so it has no native title-bar buttons. The
+    // page closes it through `hide_pet_chat`.
     .visible(true)
     .build()
     .map_err(|error| format!("failed to create pet chat window: {error}"))?;
